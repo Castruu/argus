@@ -19,9 +19,18 @@ pub fn read(home: &Path) -> Vec<(&'static str, Vec<Window>)> {
 fn claude(home: &Path) -> Vec<Window> {
     let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap_or_default()).unwrap_or_default();
     let u = &v["cachedUsageUtilization"]["utilization"];
-    [("5h", "five_hour"), ("weekly", "seven_day")].iter()
+    let cached: Vec<Window> = [("5h", "five_hour"), ("weekly", "seven_day")].iter()
         .filter_map(|(label, key)| Some(window(label.to_string(), u[*key]["utilization"].as_f64()?,
             u[*key]["resets_at"].as_str().and_then(parse_iso))))
+        .collect();
+    if !cached.is_empty() {
+        return cached;
+    }
+    // Not every Claude Code install fills that cache. hooks/statusline.sh saves the same numbers
+    // from the status line input, so fall back to its file.
+    let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/claude-limits.json")).unwrap_or_default()).unwrap_or_default();
+    [("5h", "five_hour"), ("weekly", "seven_day")].iter()
+        .filter_map(|(label, key)| Some(window(label.to_string(), v[*key]["used_percentage"].as_f64()?, v[*key]["resets_at"].as_u64())))
         .collect()
 }
 
@@ -50,7 +59,9 @@ fn codex(home: &Path) -> Vec<Window> {
 
 /// A window whose reset time has passed is back to 0%, even if the cache hasn't caught up.
 fn window(label: String, used: f64, resets_at: Option<u64>) -> Window {
-    let used = if resets_at.is_some_and(|r| r <= now()) { 0.0 } else { used };
+    if resets_at.is_some_and(|r| r <= now()) {
+        return Window { label, used: 0.0, resets_at: None }; // no "resets in 1m" for a time that has passed
+    }
     Window { label, used, resets_at }
 }
 
@@ -151,5 +162,17 @@ mod tests {
         assert_eq!(to_json(&l)[0]["windows"][1]["used"], 93.0);
         assert_eq!(to_json(&l)[1]["windows"][0]["reset"], "1h");
         assert_eq!(until(now() + 34 * 3600 + 60), "1d 10h");
+    }
+
+    #[test]
+    fn falls_back_to_the_status_line_file() {
+        let home = std::env::temp_dir().join(format!("ccs-limits-fallback-{}", std::process::id()));
+        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        fs::write(home.join(".claude.json"), "{}").unwrap();
+        fs::write(home.join(".cache/ccs/claude-limits.json"),
+            json!({"seven_day": {"used_percentage": 20, "resets_at": now() + 7200}}).to_string()).unwrap();
+        let l = read(&home);
+        fs::remove_dir_all(&home).ok();
+        assert_eq!((l[0].0, l[0].1[0].label.as_str(), l[0].1[0].used), ("Claude", "weekly", 20.0));
     }
 }

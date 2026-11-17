@@ -26,6 +26,13 @@ web-app
 - `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). In the notch it turns orange at 80% and red at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
+- `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
+
+Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
+
+The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
+
+Pull request status needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in. It is looked up in the background at most once every 5 minutes per folder, and skipped for `main`, `master` and stale sessions.
 
 ## Requirements
 
@@ -50,7 +57,21 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-Without it, the last prompt is shown instead.
+Without it, the last prompt is shown instead, and "needs you" falls back to checking whether the last message ends with a question mark.
+
+## Limits when `~/.claude.json` has none
+
+`ccs --limits` reads Claude's numbers from `cachedUsageUtilization` in `~/.claude.json`. Some installs never fill it. Claude Code also passes the limits to a status line command, so as a fallback add to `~/.claude/settings.json`:
+
+```json
+"statusLine": { "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/statusline.sh" }
+```
+
+It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`, which `ccs --limits` uses when the cache is empty.
+
+## Running next to another notch app
+
+`build/notch --beside-notch` puts the overlay in a small pill to the right of the notch instead of on it, one window level lower, so it does not fight apps like boringNotch for the hover area.
 
 ## Ghostty quick terminal
 
