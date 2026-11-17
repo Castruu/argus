@@ -27,9 +27,13 @@ web-app
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: Claude Code status line that records your usage limits for the usage bar
 
-Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, and your Claude and Codex usage with the time until reset. A turn that ends plays Tink; a session that starts needing you plays Glass.
+Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, the branch's pull request with its CI result (click it to open the PR), and your Claude and Codex usage with the time until reset. A turn that ends plays Tink; a session that starts needing you plays Glass.
 
 `ccs --json` prints `{"sessions": [...], "limits": {...}}`.
+
+The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
+
+Pull request status needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in. It is looked up in the background at most once every 5 minutes per folder, and skipped for `main`, `master` and stale sessions.
 
 ## Requirements
 

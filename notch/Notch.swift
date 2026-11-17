@@ -9,7 +9,10 @@ struct Session: Decodable, Identifiable {
     // optional so older ccs output still decodes
     var needs, stale, dirty: Bool?
     var branch, waiting_for: String?
+    var pr: PR?
 }
+
+struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String? }
 
 struct Window: Decodable { let used, resets_at: Double }
 struct ToolLimits: Decodable { let five_hour, week: Window? }
@@ -50,6 +53,10 @@ final class Store: ObservableObject {
     var tick = 0
     /// Panel is open. Closed, we poll half as often to save CPU; opening refreshes at once.
     var open = false { didSet { if open && !oldValue { refresh() } } }
+    var running = false, again = false
+    /// Screen asleep or locked: nothing to show, so do nothing.
+    var paused = false { didSet { if oldValue && !paused { refresh() } } }
+    var events: FSEventStreamRef?
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
@@ -57,27 +64,65 @@ final class Store: ObservableObject {
 
     init() {
         refresh()
+        // File events drive updates: Claude rewrites a session file when its status changes, and the hooks
+        // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true)
+        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"].filter { FileManager.default.fileExists(atPath: $0) }
+        var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
+        events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in
+            // ccs's own cache and the temp files are not news
+            let paths = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
+            guard paths.contains(where: { !$0.hasSuffix("cache.json") && !$0.hasSuffix(".tmp") && !$0.hasSuffix(".stamp") }) else { return }
+            Unmanaged<Store>.fromOpaque(info!).takeUnretainedValue().refresh()
+        }, &ctx, dirs as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
+            UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer))
+        if let events {
+            FSEventStreamSetDispatchQueue(events, .main)
+            FSEventStreamStart(events)
+        }
+        // The timer only covers what has no file event: the open panel's clocks, a Codex session going idle
+        // (10s after its last write), processes that died, and git or PR changes.
         let timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.tick += 1
-            if self.open || self.tick % 2 == 0 { self.refresh() }
+            let codexBusy = self.sessions.contains { $0.tool == "codex" && $0.status == "busy" }
+            if self.tick % (self.open ? 1 : codexBusy ? 2 : 15) == 0 { self.refresh() }
         }
         timer.tolerance = 0.5 // lets macOS batch our wakeups with others
+        let pause: [(NotificationCenter, String, Bool)] = [
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidSleepNotification.rawValue, true),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidWakeNotification.rawValue, false),
+            (DistributedNotificationCenter.default(), "com.apple.screenIsLocked", true),
+            (DistributedNotificationCenter.default(), "com.apple.screenIsUnlocked", false),
+        ]
+        for (center, name, value) in pause {
+            center.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in self?.paused = value }
+        }
     }
 
     func refresh() {
+        guard !paused else { return }
+        guard !running else { again = true; return } // one ccs at a time; run once more when it is done
+        running = true
         let ccs = self.ccs
         DispatchQueue.global().async {
+            var out: Output?
             let p = Process()
             p.executableURL = URL(fileURLWithPath: ccs)
             p.arguments = ["--json"]
             let pipe = Pipe()
             p.standardOutput = pipe
-            guard (try? p.run()) != nil else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard let s = try? JSONDecoder().decode(Output.self, from: data) else { return }
-            DispatchQueue.main.async { self.update(s) }
+            if (try? p.run()) != nil {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                out = try? JSONDecoder().decode(Output.self, from: data)
+            }
+            DispatchQueue.main.async {
+                self.running = false
+                if let out { self.update(out) }
+                if self.again { self.again = false; self.refresh() }
+            }
         }
     }
 
@@ -138,16 +183,13 @@ struct NotchView: View {
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
                 // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
                 let gs = groups(store.sessions)
-                // shrink columns so every repo fits on screen
-                let colW = min(250, (room - 36 - 18 * CGFloat(max(gs.count, 1) - 1)) / CGFloat(max(gs.count, 1)))
-                HStack(alignment: .top, spacing: 18) {
-                    ForEach(gs, id: \.0) { repo, items in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
-                            ForEach(items) { s in row(s) }
-                        }
-                        .frame(width: colW, alignment: .topLeading)
-                    }
+                // fixed-width columns; when they do not all fit, scroll sideways
+                let wanted = CGFloat(gs.count) * (colW + 18) - 18
+                if wanted > room - 36 {
+                    ScrollView(.horizontal, showsIndicators: false) { columns(gs) }.frame(width: room - 36)
+                    Text("\(gs.count) repos · scroll sideways for more").font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
+                    columns(gs)
                 }
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
@@ -193,6 +235,20 @@ struct NotchView: View {
         .padding(.trailing, beside ? trailing : 0)
     }
 
+    let colW: CGFloat = 250
+
+    func columns(_ gs: [(String, [Session])]) -> some View {
+        HStack(alignment: .top, spacing: 18) {
+            ForEach(gs, id: \.0) { repo, items in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
+                    ForEach(items) { s in row(s) }
+                }
+                .frame(width: colW, alignment: .topLeading)
+            }
+        }
+    }
+
     func groups(_ list: [Session]) -> [(String, [Session])] {
         list.reduce(into: []) { acc, s in
             if acc.last?.0 == s.repo { acc[acc.count - 1].1.append(s) } else { acc.append((s.repo, [s])) }
@@ -209,6 +265,14 @@ struct NotchView: View {
         }
     }
 
+    /// "#412 ✓": PR number with its CI result; click opens the PR.
+    func prLabel(_ pr: PR) -> some View {
+        let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", .purple) : pr.state == "CLOSED" ? (" closed", .gray)
+            : pr.ci == "fail" ? (" ✗", .red) : pr.ci == "pending" ? (" …", .yellow) : pr.ci == "pass" ? (" ✓", .green) : ("", .white.opacity(0.6))
+        return Text("#\(String(pr.number))\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
+            .onTapGesture { if let u = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(u) } }
+    }
+
     func row(_ s: Session) -> some View {
         let (word, color): (String, Color) = s.needs == true ? ("needs you", .pink) : s.status == "busy" ? ("working", .orange)
             : s.stale == true ? ("stale", .gray) : ("idle", .green)
@@ -222,8 +286,11 @@ struct NotchView: View {
                     Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 }
                 // status in its color, then tool and branch; yellow dot = uncommitted changes
-                Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(.yellow))")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(.yellow))")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    if let pr = s.pr { prLabel(pr) }
+                }
                 if s.stale != true { // stale rows stay compact
                     if let summary = s.summary {
                         Text(summary).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
@@ -298,7 +365,8 @@ struct NotchApp {
         s("web-app", "Fix flaky checkout test", "busy", 3, "Re-running checkout suite after fixing a race.", tool: "codex"),
         s("infra", "Bump Postgres to 17", "idle", 900, "Opened PR #412; CI green, waiting on merge."),
     ]
-    (sample[0].branch, sample[0].dirty, sample[1].needs, sample[4].stale) = ("main", true, true, true)
+    (sample[0].branch, sample[0].dirty, sample[1].needs, sample[4].stale) = ("rate-limit", true, true, true)
+    sample[0].pr = PR(number: 412, state: "OPEN", url: nil, ci: "pass")
     let t = Date().timeIntervalSince1970
     let limits = Limits(claude: ToolLimits(five_hour: Window(used: 84, resets_at: t + 4 * 3600), week: Window(used: 20, resets_at: t + 5 * 86400)), codex: nil)
     let notch = CGSize(width: 190, height: 32)

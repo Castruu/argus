@@ -6,7 +6,7 @@ use std::{
     env, fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,16 +28,23 @@ struct Session {
     stale: bool,                 // idle for over a day
     branch: Option<String>,
     dirty: bool,
+    pr: Value, // {number, state, draft, url, ci} or null
 }
 
 const STALE_SECS: u64 = 86400;
 const GIT_TTL: u64 = 30; // seconds between `git status` runs per folder
+const PR_TTL: u64 = 300; // seconds between GitHub lookups per folder
 
 /// Live pid -> its tty.
 type Procs = HashMap<u64, Option<String>>;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if let [_, flag, cwd, out] = args.as_slice() {
+        if flag == "--fetch-pr" {
+            return fetch_pr(cwd, Path::new(out));
+        }
+    }
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
     loop {
@@ -139,6 +146,10 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
         s.branch = g["branch"].as_str().map(str::to_string);
         s.dirty = g["dirty"] == true;
         s.stale = s.status != "busy" && s.idle_secs > STALE_SECS;
+        // default branches rarely have a PR and stale sessions are not worth a GitHub call
+        if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
+            s.pr = pr_state(home, &s.cwd);
+        }
         s.needs = !s.stale && (s.status == "waiting" || (s.status == "idle" && s.asks));
         let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
         s.summary = fs::read_to_string(&path)
@@ -227,6 +238,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             stale: false,
             branch: None,
             dirty: false,
+            pr: Value::Null,
         });
     }
     out
@@ -257,6 +269,58 @@ fn git_state(cwd: &str) -> (Option<String>, bool) {
     let text = String::from_utf8_lossy(&out.stdout);
     let branch = text.lines().find_map(|l| l.strip_prefix("# branch.head ")).map(str::to_string);
     (branch, text.lines().any(|l| !l.starts_with('#')))
+}
+
+/// Cached PR for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
+/// PR_TTL this starts `ccs --fetch-pr` in the background and returns what it has; the next run sees the result.
+fn pr_state(home: &Path, cwd: &str) -> Value {
+    let path = home.join(".cache/ccs").join(format!("pr{}.json", cwd.replace('/', "-")));
+    let age = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+    if age.is_none_or(|a| a.as_secs() > PR_TTL) {
+        // mark the attempt first, so a slow or failing lookup is not started again on the next refresh
+        let marked = if path.exists() {
+            fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(SystemTime::now()))
+        } else {
+            fs::create_dir_all(home.join(".cache/ccs")).and_then(|_| fs::write(&path, "null"))
+        };
+        if let (Ok(()), Ok(exe)) = (marked, env::current_exe()) {
+            Command::new(exe).arg("--fetch-pr").arg(cwd).arg(&path)
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
+        }
+    }
+    fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null)
+}
+
+/// `ccs --fetch-pr <cwd> <out>`: asks `gh` for the current branch's PR and writes it (or null) to <out>.
+fn fetch_pr(cwd: &str, out: &Path) {
+    // launchd starts the overlay without Homebrew on PATH
+    let pr = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"].iter()
+        .find_map(|gh| Command::new(gh).current_dir(cwd)
+            .args(["pr", "view", "--json", "number,state,isDraft,url,statusCheckRollup"]).output().ok())
+        .filter(|o| o.status.success())
+        .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+        .map_or(Value::Null, |v| json!({
+            "number": v["number"], "state": v["state"], "draft": v["isDraft"], "url": v["url"],
+            "ci": ci_of(&v["statusCheckRollup"]),
+        }));
+    let tmp = out.with_extension(format!("{}.tmp", std::process::id()));
+    if fs::write(&tmp, pr.to_string()).is_ok() {
+        fs::rename(&tmp, out).ok();
+    }
+}
+
+/// "fail" if any check failed, else "pending" if any is still running, else "pass"; None without checks.
+fn ci_of(rollup: &Value) -> Option<&'static str> {
+    let checks = rollup.as_array().filter(|a| !a.is_empty())?;
+    // check runs carry status + conclusion, commit statuses carry state
+    let has = |keys: [&str; 2], values: &[&str]| checks.iter().any(|c| keys.iter().any(|k| c[k].as_str().is_some_and(|v| values.contains(&v))));
+    Some(if has(["conclusion", "state"], &["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]) {
+        "fail"
+    } else if has(["status", "state"], &["QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED"]) {
+        "pending"
+    } else {
+        "pass"
+    })
 }
 
 /// A rate-limit window, or null when unknown or already reset.
@@ -366,6 +430,7 @@ fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
             stale: false,
             branch: None,
             dirty: false,
+            pr: Value::Null,
         });
     }
     out
@@ -376,7 +441,7 @@ fn to_json(sessions: &[Session]) -> Value {
         "tool": s.tool, "id": s.id, "title": s.title, "cwd": s.cwd,
         "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
-        "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty,
+        "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty, "pr": s.pr,
     })).collect();
     Value::Array(arr)
 }
@@ -418,7 +483,18 @@ fn print_table(sessions: &[Session], limits: &Value) {
             println!("\x1b[1;36m{repo}\x1b[0m");
         }
         let dot = if s.needs { "\x1b[35m●\x1b[0m" } else if s.status == "busy" { "\x1b[33m●\x1b[0m" } else { "\x1b[32m●\x1b[0m" };
-        let branch = s.branch.as_ref().map(|b| format!(" · {b}{}", if s.dirty { "*" } else { "" })).unwrap_or_default();
+        let mut branch = s.branch.as_ref().map(|b| format!(" · {b}{}", if s.dirty { "*" } else { "" })).unwrap_or_default();
+        if let Some(n) = s.pr["number"].as_u64() {
+            let mark = match (s.pr["state"].as_str(), s.pr["ci"].as_str()) {
+                (Some("MERGED"), _) => " merged",
+                (Some("CLOSED"), _) => " closed",
+                (_, Some("fail")) => " ✗",
+                (_, Some("pending")) => " …",
+                (_, Some("pass")) => " ✓",
+                _ => "",
+            };
+            branch += &format!(" · #{n}{mark}");
+        }
         let status = if s.needs { "needs you" } else if s.stale { "stale" } else { &s.status };
         println!("  {dot} \x1b[{}m{}\x1b[0m  \x1b[2m{} · {}{branch} · {status} {}\x1b[0m",
             if s.stale { 2 } else { 1 }, one_line(&s.title, 60), s.tool, project(&s.cwd), ago(s.idle_secs));
@@ -483,6 +559,10 @@ mod tests {
         assert!(pos("fresh") < pos("abc"), "needs-you sorts first within a repo");
         assert!(l["claude"]["five_hour"].is_null(), "a window that already reset is dropped");
         assert_eq!(l["claude"]["week"]["used"], 20.0);
+        assert_eq!(ci_of(&json!([{"status": "COMPLETED", "conclusion": "SUCCESS"}, {"state": "SUCCESS"}])), Some("pass"));
+        assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS", "conclusion": ""}, {"state": "SUCCESS"}])), Some("pending"));
+        assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "conclusion": "FAILURE"}])), Some("fail"));
+        assert_eq!(ci_of(&json!([])), None);
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
