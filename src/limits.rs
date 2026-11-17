@@ -1,6 +1,6 @@
 //! Usage limits for the signed-in Claude and Codex accounts, read from what each tool already
 //! caches on disk: no tokens, no network. Numbers are as fresh as the tool's last request.
-use crate::{ago, now, read_jsonl};
+use crate::{now, read_jsonl};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}};
 
@@ -54,6 +54,17 @@ fn window(label: String, used: f64, resets_at: Option<u64>) -> Window {
     Window { label, used, resets_at }
 }
 
+/// Time until `at`: "1d 10h", "3h", "12m".
+fn until(at: u64) -> String {
+    let s = at.saturating_sub(now());
+    match (s / 86_400, s % 86_400 / 3600) {
+        (0, 0) => format!("{}m", (s / 60).max(1)),
+        (0, h) => format!("{h}h"),
+        (d, 0) => format!("{d}d"),
+        (d, h) => format!("{d}d {h}h"),
+    }
+}
+
 fn label(secs: u64) -> String {
     match secs {
         604_800 => "weekly".into(),
@@ -66,17 +77,23 @@ fn label(secs: u64) -> String {
 pub fn line(limits: &[(&str, Vec<Window>)]) -> String {
     limits.iter().map(|(tool, ws)| {
         let parts: Vec<String> = ws.iter().map(|w| {
-            let reset = w.resets_at.map(|r| format!(" ↻{}", ago(r.saturating_sub(now())))).unwrap_or_default();
+            let reset = w.resets_at.map(|r| format!(" ↻{}", until(r))).unwrap_or_default();
             format!("{} {:.0}%{reset}", w.label, w.used)
         }).collect();
         format!("{tool} {}", parts.join(" · "))
     }).collect::<Vec<_>>().join("   ")
 }
 
-/// The tightest window decides how close you are to being blocked.
+/// `[{tool, windows: [{label, used, reset}]}]`; each window is colored by its own usage in the notch.
 pub fn to_json(limits: &[(&str, Vec<Window>)]) -> Value {
-    let max = limits.iter().flat_map(|(_, w)| w).map(|w| w.used).fold(0.0, f64::max);
-    json!({ "text": line(limits), "max_used": max })
+    limits.iter().map(|(tool, ws)| json!({
+        "tool": tool,
+        "windows": ws.iter().map(|w| json!({
+            "label": w.label,
+            "used": w.used,
+            "reset": w.resets_at.map(until),
+        })).collect::<Vec<_>>(),
+    })).collect()
 }
 
 /// Unix seconds from "2026-11-17T16:59:59.538613+00:00" or "...Z".
@@ -116,7 +133,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("ccs-limits-{}", std::process::id()));
         let day = home.join(".codex/sessions/2026/11/17");
         fs::create_dir_all(&day).unwrap();
-        let soon = now() + 3600;
+        let soon = now() + 3600 + 120; // buffer so the "1h" below never becomes "59m"
         fs::write(home.join(".claude.json"), json!({"cachedUsageUtilization": {"utilization": {
             "five_hour": {"utilization": 9, "resets_at": "1970-01-01T00:00:00Z"},  // already reset -> 0%
             "seven_day": {"utilization": 93, "resets_at": "2999-01-01T00:00:00Z"}}}}).to_string()).unwrap();
@@ -131,6 +148,8 @@ mod tests {
             ("Claude", vec![("5h".to_string(), 0.0), ("weekly".to_string(), 93.0)]),
             ("Codex", vec![("weekly".to_string(), 1.0)]),
         ]);
-        assert_eq!(to_json(&l)["max_used"], 93.0);
+        assert_eq!(to_json(&l)[0]["windows"][1]["used"], 93.0);
+        assert_eq!(to_json(&l)[1]["windows"][0]["reset"], "1h");
+        assert_eq!(until(now() + 34 * 3600 + 60), "1d 10h");
     }
 }

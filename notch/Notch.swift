@@ -27,7 +27,7 @@ func focus(_ s: Session) {
 
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
-    @Published var limits = Limits(text: "", max_used: 0)
+    @Published var limits: [ToolLimits] = []
     @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
@@ -43,7 +43,7 @@ final class Store: ObservableObject {
         let ccs = self.ccs
         DispatchQueue.global().async {
             let sessions = try? JSONDecoder().decode([Session].self, from: run(ccs, ["--json"]))
-            let limits = try? JSONDecoder().decode(Limits.self, from: run(ccs, ["--limits", "--json"]))
+            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, ["--limits", "--json"]))
             DispatchQueue.main.async {
                 if let limits { self.limits = limits }
                 if let sessions { self.update(sessions) }
@@ -63,11 +63,16 @@ final class Store: ObservableObject {
     }
 }
 
-/// `ccs --limits --json`: one display line plus the tightest window's % used, for coloring.
-struct Limits: Decodable {
-    let text: String
-    let max_used: Double
-    var color: Color { max_used >= 95 ? .red : max_used >= 80 ? .orange : .secondary }
+/// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
+struct ToolLimits: Decodable {
+    struct Window: Decodable {
+        let label: String
+        let used: Double
+        let reset: String?
+        var color: Color { used >= 95 ? .red : used >= 80 ? .orange : .white.opacity(0.75) }
+    }
+    let tool: String
+    let windows: [Window]
 }
 
 func run(_ bin: String, _ args: [String]) -> Data {
@@ -109,9 +114,7 @@ struct NotchView: View {
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnsHeight = $0 }
-                if !store.limits.text.isEmpty {
-                    Text(store.limits.text).font(.system(size: 10, weight: .medium)).foregroundStyle(store.limits.color)
-                }
+                if !store.limits.isEmpty { limitsRow.padding(.bottom, 6) }
                 // Hug the content; only scroll once it outgrows the cap (a flexible frame here made the panel always 520pt tall).
                 let maxHeight = 520 - notch.height
                 if columnsHeight > maxHeight {
@@ -146,6 +149,26 @@ struct NotchView: View {
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    var limitsRow: some View {
+        HStack(spacing: 20) {
+            ForEach(store.limits, id: \.tool) { t in
+                HStack(spacing: 6) {
+                    Text(t.tool).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    ForEach(t.windows, id: \.label) { w in
+                        HStack(spacing: 4) {
+                            Text(w.label).foregroundStyle(.secondary)
+                            Text("\(Int(w.used.rounded()))%").fontWeight(.semibold).foregroundStyle(w.color)
+                            if let r = w.reset { Text("↻\(r)").foregroundStyle(.tertiary) }
+                        }
+                        .font(.system(size: 11).monospacedDigit())
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(w.color.opacity(0.14)))
+                    }
+                }
+            }
+        }
     }
 
     func groups(_ list: [Session]) -> [(String, [Session])] {
@@ -235,7 +258,10 @@ struct NotchApp {
         try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
     let withLimits = Store(sample: sample)
-    withLimits.limits = Limits(text: "Claude 5h 16% ↻3h · weekly 86% ↻1d   Codex weekly 12% ↻4d", max_used: 86)
-    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 240)
+    withLimits.limits = [
+        ToolLimits(tool: "Claude", windows: [.init(label: "5h", used: 16, reset: "3h"), .init(label: "weekly", used: 86, reset: "23h")]),
+        ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 12, reset: "4d")]),
+    ]
+    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 250)
     save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }
