@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     env, fs,
-    io::{Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -109,14 +109,20 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         *entry = json!({"path": entry["path"]});
         from = 0;
     }
-    let mut buf = Vec::new();
-    if f.seek(SeekFrom::Start(from)).is_err() || f.read_to_end(&mut buf).is_err() {
+    if f.seek(SeekFrom::Start(from)).is_err() {
         return;
     }
-    // stop at the last newline so a half-written line is read next time
-    let Some(end) = buf.iter().rposition(|&b| b == b'\n') else { return };
-    for line in String::from_utf8_lossy(&buf[..end]).lines() {
-        let Ok(l) = serde_json::from_str::<Value>(line) else { continue };
+    let mut reader = BufReader::new(f.take(len - from));
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut line) else { break };
+        // Leave a half-written line at its starting offset so the next refresh retries it.
+        if n == 0 || !line.ends_with(b"\n") {
+            break;
+        }
+        from += n as u64;
+        let Ok(l) = serde_json::from_slice::<Value>(&line) else { continue };
         if let Some(t) = l["aiTitle"].as_str() {
             entry["title"] = t.into();
         }
@@ -137,7 +143,7 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
             }
         }
     }
-    entry["len"] = (from + end as u64 + 1).into();
+    entry["len"] = from.into();
 }
 
 fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
@@ -204,12 +210,11 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
     out
 }
 
-fn read_jsonl(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = Value> {
+    fs::File::open(path).into_iter()
+        .flat_map(|f| BufReader::new(f).lines().map_while(Result::ok))
+        .filter(move |l| keep(l))
+        .filter_map(|l| serde_json::from_str(&l).ok())
 }
 
 fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session> {
@@ -367,29 +372,36 @@ fn open_codex_rollouts() -> Vec<PathBuf> {
 }
 
 fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
-    let titles = read_jsonl(&home.join(".codex/session_index.jsonl"));
+    let index = home.join(".codex/session_index.jsonl");
     let mut out = vec![];
     for path in open {
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
-        let lines = read_jsonl(path);
-        let Some(meta) = lines.iter().find(|l| l["type"] == "session_meta") else { continue };
-        let meta = &meta["payload"];
+        let (mut meta, mut last_prompt) = (None::<Value>, String::new());
+        // Match tokens, not key/value spacing; parsed fields below decide which lines count.
+        for l in read_jsonl(path, |l| l.contains("\"session_meta\"") || l.contains("\"user\"")) {
+            if meta.is_none() && l["type"] == "session_meta" {
+                meta = Some(l["payload"].clone());
+            }
+            if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
+                if let Some(t) = l["payload"]["content"][0]["text"].as_str()
+                    .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
+                    last_prompt = t.to_string();
+                }
+            }
+        }
+        let Some(meta) = meta else { continue };
         // subagent = internal reviewer threads; exec = headless `codex exec` runs
         if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
             continue;
         }
         let id = meta["id"].as_str().unwrap_or_default().to_string();
-        let title = titles.iter().rev()
-            .find(|t| t["id"] == id.as_str())
-            .and_then(|t| t["thread_name"].as_str())
-            .unwrap_or("?").to_string();
-        let last_prompt = lines.iter().rev()
-            .filter(|l| l["payload"]["type"] == "message" && l["payload"]["role"] == "user")
-            .filter_map(|l| l["payload"]["content"][0]["text"].as_str())
-            .find(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md"))
-            .unwrap_or("").to_string();
+        let title = read_jsonl(&index, |_| true)
+            .filter(|t| t["id"] == id.as_str())
+            .last()
+            .and_then(|t| t["thread_name"].as_str().map(str::to_string))
+            .unwrap_or_else(|| "?".to_string());
         out.push(Session {
             tool: "codex",
             id,
@@ -481,6 +493,55 @@ fn print_table(sessions: &[Session]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn streams_spaced_json_and_retries_partial_transcript_lines() {
+        let home = env::temp_dir().join(format!("ccs-stream-{}", std::process::id()));
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        let claude = home.join("claude.jsonl");
+        let body = [
+            r#"{"customTitle": "My title"}"#,
+            &json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": "x".repeat(100_000)}]}}).to_string(),
+            r#"{"type" : "user", "message": {"content" : "spaced prompt"}}"#,
+            r#"{"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}"#,
+            r#"{"type": "assistant", "message": {"content": [{"text": "Ship it?"}]}}"#,
+            r#"{"type": "pr-link", "prNumber": 7, "prUrl": "https://github.com/o/r/pull/7"}"#,
+            r#"{"aiTitle": "Later AI title"}"#,
+            r#"{"type": "user", "message": {"content": "next"#,
+        ].join("\n");
+        fs::write(&claude, &body).unwrap();
+        let mut entry = json!({"path": claude.to_string_lossy()});
+        scan_transcript(&claude, &mut entry);
+        assert_eq!(entry["last_prompt"], "spaced prompt");
+        assert_eq!(entry["custom_title"], "My title");
+        assert_eq!(entry["title"], "Later AI title");
+        assert_eq!(entry["asks"], true);
+        assert_eq!(entry["pr_link"]["number"], 7);
+        assert_eq!(entry["len"], body.rfind('\n').unwrap() + 1);
+        fs::OpenOptions::new().append(true).open(&claude).unwrap().write_all(b" prompt\"}}\n").unwrap();
+        scan_transcript(&claude, &mut entry);
+        assert_eq!(entry["last_prompt"], "next prompt");
+        assert_eq!(entry["len"], fs::metadata(&claude).unwrap().len());
+
+        let codex = home.join("rollout.jsonl");
+        fs::write(&codex, concat!(
+            r#"{"type": "session_meta", "payload": {"id": "cx1", "cwd": "/x", "source": "cli"}}"#, "\n",
+            r#"{"payload":{"type":"message","role":"user","content":[{"text":"old prompt"}]}}"#, "\n",
+            "{\"payload\": {\"type\": \"message\", \"role\"\t:\t\"user\", \"content\": [{\"text\": \"spaced codex prompt\"}]}}\n",
+            r##"{"payload": {"type": "message", "role": "user", "content": [{"text": "# AGENTS.md instructions"}]}}"##, "\n",
+            r#"{"payload": {"type": "message", "role": "user", "content": [{"text": "half"#,
+        )).unwrap();
+        fs::write(home.join(".codex/session_index.jsonl"), concat!(
+            r#"{"id":"cx1","thread_name":"Old title"}"#, "\n",
+            r#"{"id": "cx1", "thread_name": "Newest title"}"#, "\n",
+        )).unwrap();
+        let sessions = codex_sessions(&home, &[codex]);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].last_prompt, "spaced codex prompt");
+        assert_eq!(sessions[0].title, "Newest title");
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn reads_claude_and_codex_fixtures() {
