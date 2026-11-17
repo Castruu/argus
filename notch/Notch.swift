@@ -27,6 +27,8 @@ func focus(_ s: Session) {
 
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
+    @Published var limits: String = ""
+    var limitsAt = Date.distantPast
     @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
@@ -49,6 +51,11 @@ final class Store: ObservableObject {
             guard (try? p.run()) != nil else { return }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
+            if Date().timeIntervalSince(self.limitsAt) > 60 {
+                self.limitsAt = Date()
+                let l = readLimits()
+                DispatchQueue.main.async { self.limits = l }
+            }
             guard let s = try? JSONDecoder().decode([Session].self, from: data) else { return }
             DispatchQueue.main.async { self.update(s) }
         }
@@ -64,6 +71,17 @@ final class Store: ObservableObject {
             if self.finished?.id == done.id { withAnimation(.spring(duration: 0.3)) { self.finished = nil } }
         }
     }
+}
+
+/// One line of Claude and Codex limits from hooks/limits.sh (next to this repo's build/ folder).
+func readLimits() -> String {
+    let p = Process()
+    p.executableURL = binDir.deletingLastPathComponent().appendingPathComponent("hooks/limits.sh")
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    guard (try? p.run()) != nil else { return "" }
+    let out = pipe.fileHandleForReading.readDataToEndOfFile()
+    return String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 func ago(_ s: Int) -> String { s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m" : "\(s / 3600)h" }
@@ -82,7 +100,7 @@ struct NotchView: View {
                 }
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
                 // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
-                HStack(alignment: .top, spacing: 18) {
+                let columns = HStack(alignment: .top, spacing: 18) {
                     ForEach(groups(store.sessions), id: \.0) { repo, items in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
@@ -91,6 +109,14 @@ struct NotchView: View {
                         .frame(width: 250, alignment: .topLeading)
                     }
                 }
+                if !store.limits.isEmpty {
+                    Text(store.limits).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                }
+                ViewThatFits(in: .vertical) {
+                    columns
+                    ScrollView(.vertical) { columns }.frame(height: 520 - notch.height)
+                }
+                .frame(maxHeight: 520 - notch.height)
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
                 HStack(spacing: 6) {
