@@ -9,9 +9,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-// shortcut: Codex has no live-session registry, so "active" means the rollout was written recently; upgrade by matching running codex PIDs to cwd.
-const CODEX_ACTIVE_SECS: u64 = 30 * 60;
-
 struct Session {
     tool: &'static str,
     id: String,
@@ -30,7 +27,7 @@ fn main() {
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
     loop {
-        let sessions = collect(&home());
+        let sessions = collect(&home(), &open_codex_rollouts());
         if as_json {
             println!("{}", to_json(&sessions));
         } else {
@@ -54,9 +51,9 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-fn collect(home: &Path) -> Vec<Session> {
+fn collect(home: &Path, codex_open: &[PathBuf]) -> Vec<Session> {
     let mut out = claude_sessions(home);
-    out.extend(codex_sessions(home));
+    out.extend(codex_sessions(home, codex_open));
     for s in &mut out {
         s.repo = repo_of(&s.cwd);
         s.summary = fs::read_to_string(home.join(".cache/ccs").join(format!("{}.txt", s.id)))
@@ -141,21 +138,33 @@ fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-fn codex_sessions(home: &Path) -> Vec<Session> {
-    let mut files = vec![];
-    walk(&home.join(".codex/sessions"), &mut files);
+/// Codex has no live-session registry, but a running `codex` keeps its rollout file open,
+/// so open rollouts == live sessions. Closed sessions disappear immediately.
+fn open_codex_rollouts() -> Vec<PathBuf> {
+    let Ok(out) = Command::new("lsof").args(["-c", "codex", "-Fn"]).output() else { return vec![] };
+    let mut paths: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout).lines()
+        .filter_map(|l| l.strip_prefix('n'))
+        .filter(|p| p.contains("/.codex/sessions/") && p.ends_with(".jsonl"))
+        .map(PathBuf::from)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
     let titles = read_jsonl(&home.join(".codex/session_index.jsonl"));
     let mut out = vec![];
-    for (path, mtime) in files {
+    for path in open {
+        let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
-        if idle > CODEX_ACTIVE_SECS {
-            continue;
-        }
-        let lines = read_jsonl(&path);
+        let lines = read_jsonl(path);
         let Some(meta) = lines.iter().find(|l| l["type"] == "session_meta") else { continue };
         let meta = &meta["payload"];
-        if meta["source"]["subagent"].is_object() {
-            continue; // internal reviewer threads, not user sessions
+        // subagent = internal reviewer threads; exec = headless `codex exec` runs
+        if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
+            continue;
         }
         let id = meta["id"].as_str().unwrap_or_default().to_string();
         let title = titles.iter().rev()
@@ -181,20 +190,6 @@ fn codex_sessions(home: &Path) -> Vec<Session> {
         });
     }
     out
-}
-
-fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            walk(&p, out);
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
-            let mtime = e.metadata().and_then(|m| m.modified()).ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-            out.push((p, mtime));
-        }
-    }
 }
 
 fn to_json(sessions: &[Session]) -> String {
@@ -270,12 +265,16 @@ mod tests {
         w(".codex/sessions/2026/01/01/rollout-1.jsonl", concat!(
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add tests"}]}}"#, "\n"));
+        w(".codex/sessions/2026/01/01/rollout-closed.jsonl", r#"{"type":"session_meta","payload":{"id":"gone","cwd":"/z","source":"cli"}}"#);
+        w(".codex/sessions/2026/01/01/rollout-exec.jsonl", r#"{"type":"session_meta","payload":{"id":"ex","cwd":"/z","source":"exec"}}"#);
         w(".codex/session_index.jsonl", r#"{"id":"cx1","thread_name":"API tests"}"#);
         w(".cache/ccs/abc.txt", "Fixing the login bug\n");
 
-        let s = collect(&home);
+        let rollouts = home.join(".codex/sessions/2026/01/01");
+        let open = [rollouts.join("rollout-1.jsonl"), rollouts.join("rollout-exec.jsonl")]; // rollout-closed is not open
+        let s = collect(&home, &open);
         fs::remove_dir_all(&home).ok();
-        assert_eq!(s.len(), 2, "dead pid and headless runs must be skipped");
+        assert_eq!(s.len(), 2, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.tool == "claude").unwrap();
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
