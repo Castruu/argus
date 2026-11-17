@@ -30,7 +30,7 @@ web-app
 - `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). With the default Cool palette, a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
-- `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
+- `hooks/statusline.sh`: optional Claude Code status line; keeps Claude limits fresh between `/usage` cache updates
 
 Each session shows its state: working, idle, needs you (Claude Code explicitly reports a pending permission, input, sandbox, worker or goal request) or stale (idle for over a day). Informational dialogs such as `/usage`, ordinary text questions and AI summaries do not trigger "needs you". You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass. Click the speaker icon beside the palette icon to mute or unmute both chimes; the choice is remembered across launches, and visual notifications still appear.
 
@@ -86,15 +86,15 @@ Add to `~/.claude/settings.json`:
 
 Without it, the last prompt is shown instead. Summaries are for display only; "needs you" always comes from explicit pending requests.
 
-## Limits when `~/.claude.json` has none
+## Keeping Claude limits current
 
-`ccs --limits` reads Claude's numbers from `cachedUsageUtilization` in `~/.claude.json`. Some installs never fill it. Claude Code also passes the limits to a status line command, so as a fallback add to `~/.claude/settings.json`:
+`ccs --limits` reads Claude's numbers from `cachedUsageUtilization` in `~/.claude.json`. That cache can be missing or stale. Claude Code also passes the limits to a status line command, so add to `~/.claude/settings.json`:
 
 ```json
 "statusLine": { "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/statusline.sh" }
 ```
 
-It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`, which `ccs --limits` uses when the cache is empty.
+It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`. `ccs --limits` uses the newest sample for each window. Without this hook, the overlay only knows Claude's last cached `/usage` result. Reset windows remain visible at 0%.
 
 ## Running next to another notch app
 

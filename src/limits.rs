@@ -6,6 +6,7 @@ use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 pub struct Window {
@@ -19,22 +20,23 @@ pub fn read(home: &Path) -> Vec<(&'static str, Vec<Window>)> {
     [("Claude", claude(home)), ("Codex", codex(home))].into_iter().filter(|(_, w)| !w.is_empty()).collect()
 }
 
-/// Claude Code caches its /usage numbers in ~/.claude.json.
+/// Prefer the latest /usage or status-line sample, falling back per window if one is missing.
 fn claude(home: &Path) -> Vec<Window> {
     let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap_or_default()).unwrap_or_default();
     let u = &v["cachedUsageUtilization"]["utilization"];
-    let cached: Vec<Window> = [("5h", "five_hour"), ("weekly", "seven_day")].iter()
-        .filter_map(|(label, key)| Some(window(label.to_string(), u[*key]["utilization"].as_f64()?,
-            u[*key]["resets_at"].as_str().and_then(parse_iso))))
-        .collect();
-    if !cached.is_empty() {
-        return cached;
-    }
-    // Not every Claude Code install fills that cache. hooks/statusline.sh saves the same numbers
-    // from the status line input, so fall back to its file.
-    let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/claude-limits.json")).unwrap_or_default()).unwrap_or_default();
+    let path = home.join(".cache/ccs/claude-limits.json");
+    let status: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default();
+    let status_at = fs::metadata(&path).and_then(|m| m.modified()).ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+    let cached_at = v["cachedUsageUtilization"]["fetchedAtMs"].as_u64().unwrap_or(0);
     [("5h", "five_hour"), ("weekly", "seven_day")].iter()
-        .filter_map(|(label, key)| Some(window(label.to_string(), v[*key]["used_percentage"].as_f64()?, v[*key]["resets_at"].as_u64())))
+        .filter_map(|(label, key)| {
+            let cached = || Some(window(label.to_string(), u[*key]["utilization"].as_f64()?,
+                u[*key]["resets_at"].as_str().and_then(parse_iso)));
+            let live = || Some(window(label.to_string(), status[*key]["used_percentage"].as_f64()?,
+                status[*key]["resets_at"].as_u64()));
+            if status_at > cached_at { live().or_else(cached) } else { cached().or_else(live) }
+        })
         .collect()
 }
 
@@ -222,5 +224,25 @@ mod tests {
         let l = read(&home);
         fs::remove_dir_all(&home).ok();
         assert_eq!((l[0].0, l[0].1[0].label.as_str(), l[0].1[0].used), ("Claude", "weekly", 20.0));
+    }
+
+    #[test]
+    fn prefers_fresh_claude_samples_and_keeps_missing_windows() {
+        let home = std::env::temp_dir().join(format!("ccs-limits-fresh-{}", std::process::id()));
+        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        let cache = |at| json!({"cachedUsageUtilization": {"fetchedAtMs": at, "utilization": {
+            "five_hour": {"utilization": 38, "resets_at": "1970-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 98, "resets_at": "2999-01-01T00:00:00Z"}
+        }}}).to_string();
+        fs::write(home.join(".claude.json"), cache(1)).unwrap();
+        fs::write(home.join(".cache/ccs/claude-limits.json"),
+            json!({"seven_day": {"used_percentage": 100, "resets_at": now() + 7200}}).to_string()).unwrap();
+        let used = || claude(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
+        fs::write(home.join(".claude.json"), cache((now() + 60) * 1000)).unwrap();
+        assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
+        fs::write(home.join(".cache/ccs/claude-limits.json"), "invalid").unwrap();
+        assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
+        fs::remove_dir_all(home).unwrap();
     }
 }

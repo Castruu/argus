@@ -7,8 +7,8 @@ mkdir -p "$dir"
 [ -n "$CCS_STATUSLINE_DEBUG" ] && printf '%s' "$input" > "$dir/statusline-debug.json"
 tmp="$dir/claude-limits.$$.tmp"
 printf '%s' "$input" | jq -c '.rate_limits // empty' > "$tmp" 2>/dev/null
-# only replace the file when the numbers changed: the overlay refreshes on every write in this folder
-if [ -s "$tmp" ] && ! cmp -s "$tmp" "$dir/claude-limits.json"; then mv "$tmp" "$dir/claude-limits.json"; else rm -f "$tmp"; fi
+# The modification time records freshness even when the percentages have not changed.
+if [ -s "$tmp" ]; then mv "$tmp" "$dir/claude-limits.json"; else rm -f "$tmp"; fi
 printf '%s' "$input" | jq -r '
   [ .model.display_name // empty,
     (.rate_limits.five_hour.used_percentage | select(. != null) | "5h \(round)%"),
