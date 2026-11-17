@@ -17,6 +17,7 @@ struct Session: Decodable, Identifiable, Equatable {
 struct PR: Decodable, Equatable { let number: Int; let state: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+let scriptDir = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.resourceURL ?? binDir : binDir
 
 /// Repos on screen, sorted by name; set by the Store on every update.
 nonisolated(unsafe) var repoNames: [String] = []
@@ -117,7 +118,7 @@ func focus(_ s: Session) {
     func script(_ file: String) { // these find the exact tab by tty (or working directory)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = [binDir.appendingPathComponent(file).path, s.tty ?? "", s.cwd]
+        p.arguments = [scriptDir.appendingPathComponent(file).path, s.tty ?? "", s.cwd]
         try? p.run()
     }
     guard let app = s.app.map({ URL(fileURLWithPath: $0) }) else {

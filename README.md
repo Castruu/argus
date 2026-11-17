@@ -46,6 +46,18 @@ PR links must use HTTPS and match the displayed PR number. The viewer accepts `g
 
 A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
+## Install on Mac
+
+For a packaged release, download the DMG for your Mac from [GitHub Releases](https://github.com/Castruu/cc-sessions-viewer/releases). The first package targets Apple Silicon on macOS 14 or later. Open the disk image, drag **CC Sessions Viewer** to **Applications**, then open the app and hover over the notch. macOS may ask for Automation permission when you select a terminal session.
+
+The installed app includes the CLI at `/Applications/CC Sessions Viewer.app/Contents/MacOS/ccs`. Summaries are opt-in. To use the packaged Claude summary hook, use this JSON field in the Stop hook configuration below (for Codex, append ` codex` after the closing single quote):
+
+```json
+"command": "'/Applications/CC Sessions Viewer.app/Contents/Resources/hooks/summarize.sh'"
+```
+
+The status-line hook is in the same folder. For release builds, see [Packaging a release](docs/releasing.md).
+
 ## Requirements
 
 - macOS, Rust (`cargo`) and Xcode command line tools (`swiftc`) to build
