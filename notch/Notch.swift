@@ -29,6 +29,8 @@ final class Store: ObservableObject {
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
+    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished }
+
     init() {
         refresh()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
@@ -67,7 +69,7 @@ func ago(_ s: Int) -> String { s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m" : "\(s
 struct NotchView: View {
     @ObservedObject var store: Store
     let notch: CGSize
-    @State private var open = false
+    @State var open = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -149,6 +151,10 @@ final class ClickThroughHost<V: View>: NSHostingView<V> {
 @main
 struct NotchApp {
     static func main() {
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+            MainActor.assumeIsolated { snapshot(to: CommandLine.arguments[i + 1]) }
+            return
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let screen = NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main!
@@ -172,4 +178,32 @@ struct NotchApp {
         panel.orderFrontRegardless()
         app.run()
     }
+}
+
+/// `notch --snapshot <dir>`: renders README screenshots from sample data (no screen-recording permission needed).
+@MainActor func snapshot(to dir: String) {
+    func s(_ repo: String, _ title: String, _ status: String, _ idle: Int, _ summary: String, tool: String = "claude") -> Session {
+        Session(tool: tool, id: title, title: title, project: repo, repo: repo, cwd: "", status: status,
+                last_prompt: "", idle_secs: idle, summary: summary, tty: nil)
+    }
+    let sample = [
+        s("api", "Add rate limiting to /login", "busy", 8, "Writing middleware tests; no input needed yet."),
+        s("api", "Migrate users table", "idle", 240, "Migration ready; waiting on you to approve running it."),
+        s("web-app", "Dark mode toggle", "idle", 35, "Toggle done and screenshots taken; waiting for review."),
+        s("web-app", "Fix flaky checkout test", "busy", 3, "Re-running checkout suite after fixing a race.", tool: "codex"),
+        s("infra", "Bump Postgres to 17", "idle", 900, "Opened PR #412; CI green, waiting on merge."),
+    ]
+    let notch = CGSize(width: 190, height: 32)
+    func save(_ view: some View, _ name: String, height: CGFloat) {
+        let framed = view.frame(width: 1000, height: height)
+            .background(LinearGradient(colors: [Color(red: 0.25, green: 0.3, blue: 0.5), Color(red: 0.55, green: 0.35, blue: 0.5)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing))
+        let r = ImageRenderer(content: framed)
+        r.scale = 2
+        guard let tiff = r.nsImage?.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return print("render failed: \(name)") }
+        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+    }
+    save(NotchView(store: Store(sample: sample), notch: notch, open: true), "notch-open.png", height: 215)
+    save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }
