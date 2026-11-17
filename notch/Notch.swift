@@ -10,25 +10,87 @@ struct Session: Decodable, Identifiable, Equatable {
     var needs, stale, dirty: Bool?
     var branch, waiting_for: String?
     var pr: PR?
+    var app: String? // bundle of the terminal or editor the session runs in
 }
 
 struct PR: Decodable, Equatable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
-/// Stable color per repo name (String.hashValue is randomized per launch).
+/// Repos on screen, sorted by name; set by the Store on every update.
+nonisolated(unsafe) var repoNames: [String] = []
+
+/// One color per repo, spread evenly from green through blue to violet so neighbours never look alike.
+/// Pastel on purpose: the saturated versions of these hues are reserved for the session states.
 func repoColor(_ repo: String) -> Color {
-    let h = repo.utf8.reduce(UInt32(5381)) { ($0 &* 33) &+ UInt32($1) }
-    return Color(hue: Double(h % 360) / 360, saturation: 0.65, brightness: 0.95)
+    let i = Double(repoNames.firstIndex(of: repo) ?? 0)
+    return Color(hue: 0.30 + 0.50 * (i + 0.5) / Double(max(repoNames.count, 1)), saturation: 0.38, brightness: 0.97)
 }
 
+/// One cool family for the states, plus a single warm color kept for things that are broken.
+extension Color {
+    static let working = Color(hue: 0.57, saturation: 0.72, brightness: 1.00)  // sky blue
+    static let idle = Color(hue: 0.40, saturation: 0.62, brightness: 0.86)     // green
+    static let needsYou = Color(hue: 0.76, saturation: 0.55, brightness: 1.00) // violet
+    static let failing = Color(hue: 0.01, saturation: 0.62, brightness: 1.00)  // coral
+    static let caution = Color(hue: 0.48, saturation: 0.65, brightness: 0.92)  // teal: pending checks, uncommitted changes
+    static let merged = Color(hue: 0.48, saturation: 0.65, brightness: 0.92)
+}
+
+/// Marks something as clickable: open-hand cursor and a faint highlight under the mouse.
+struct Clickable: ViewModifier {
+    @State private var hover = false
+    func body(content: Content) -> some View {
+        let lit = content
+            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(hover ? 0.09 : 0)))
+            .onHover { inside in
+                hover = inside
+                // set, not push/pop: a row can vanish while hovered, which would leave a pushed cursor stuck.
+                // macOS only honors this while the overlay is the active app; the highlight always shows.
+                (inside ? NSCursor.openHand : NSCursor.arrow).set()
+            }
+        if #available(macOS 15, *) { lit.pointerStyle(.grabIdle) } else { lit }
+    }
+}
+
+/// VS Code and its forks, by app name -> folder under ~/Library/Application Support.
+let editors = ["Visual Studio Code": "Code", "Visual Studio Code - Insiders": "Code - Insiders",
+               "Cursor": "Cursor", "Windsurf": "Windsurf", "VSCodium": "VSCodium"]
+
+/// The open folder or workspace file that contains `cwd`, read from the editor's own window list.
+func editorWindow(support: String, containing cwd: String) -> String? {
+    let path = NSHomeDirectory() + "/Library/Application Support/\(support)/User/globalStorage/storage.json"
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let state = json["windowsState"] as? [String: Any] else { return nil }
+    return editorWindow(state: state, containing: cwd)
+}
+
+/// Brings the session forward in whatever app runs it.
 func focus(_ s: Session) {
-    // without Ghostty, `tell application "Ghostty"` would pop a "Where is Ghostty?" picker, so do nothing
-    guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") != nil else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = [binDir.appendingPathComponent("focus.applescript").path, s.tty ?? "", s.cwd]
-    try? p.run()
+    func script(_ file: String) { // these find the exact tab by tty (or working directory)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = [binDir.appendingPathComponent(file).path, s.tty ?? "", s.cwd]
+        try? p.run()
+    }
+    guard let app = s.app.map({ URL(fileURLWithPath: $0) }) else {
+        // no app found (tmux, Codex): Ghostty by tty or cwd, as before. Without Ghostty,
+        // `tell application "Ghostty"` would pop a "Where is Ghostty?" picker, so do nothing.
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") != nil { script("focus.applescript") }
+        return
+    }
+    let name = app.deletingPathExtension().lastPathComponent
+    if name == "Ghostty" {
+        script("focus.applescript")
+    } else if name == "Terminal" {
+        script("focus-terminal.applescript")
+    } else if let support = editors[name], let target = editorWindow(support: support, containing: s.cwd) {
+        // Opening an already-open folder or workspace file brings its window forward.
+        NSWorkspace.shared.open([URL(fileURLWithPath: target)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    } else {
+        NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+    }
 }
 
 final class Store: ObservableObject {
@@ -46,7 +108,7 @@ final class Store: ObservableObject {
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
-    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished }
+    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished; repoNames = Set(sample.map(\.repo)).sorted() }
 
     init() {
         refresh()
@@ -117,6 +179,7 @@ final class Store: ObservableObject {
         let wasNeeding = Set(sessions.filter { $0.needs == true }.map(\.id))
         let first = !loaded
         (sessions, loaded) = (new, true)
+        repoNames = Set(new.map(\.repo)).sorted()
         guard !first else { return } // no chimes for what was already there at launch
         // "needs you" (Glass) wins over "finished" (Tink)
         let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
@@ -169,9 +232,9 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height - 6)
                 // header: counts by state (doubles as the color legend) on the left, usage on the right
                 HStack(spacing: 14) {
-                    count("working", .orange) { $0.status == "busy" }
-                    count("need you", .pink) { $0.needs == true }
-                    count("idle", .green) { $0.status != "busy" && $0.needs != true && $0.stale != true }
+                    count("working", .working) { $0.status == "busy" }
+                    count("need you", .needsYou) { $0.needs == true }
+                    count("idle", .idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
                     count("stale", .gray) { $0.stale == true }
                     Spacer(minLength: 24)
                     if !store.limits.isEmpty { limitsRow }
@@ -198,16 +261,17 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height)
                 HStack(spacing: 6) {
                     Image(systemName: f.needs == true ? "bell.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(f.needs == true ? .pink : repoColor(f.repo))
+                        .foregroundStyle(f.needs == true ? .needsYou : repoColor(f.repo))
                     Text("\(f.repo): \(f.title)\(f.needs == true ? " needs you" : "")").font(.system(size: 12, weight: .medium)).lineLimit(1)
                 }
                 .padding(.horizontal, 14).padding(.bottom, 8)
+                .modifier(Clickable())
                 .onTapGesture { focus(f) }
             } else {
                 // collapsed: one dot per busy session, sitting under the notch
                 HStack(spacing: 3) {
                     ForEach(store.sessions.filter { $0.status == "busy" || $0.needs == true }) { s in
-                        Circle().fill(s.needs == true ? .pink : repoColor(s.repo)).frame(width: 4, height: 4)
+                        Circle().fill(s.needs == true ? .needsYou : repoColor(s.repo)).frame(width: 4, height: 4)
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 3)
                 .overlay {
@@ -216,11 +280,11 @@ struct NotchView: View {
                     let needing = store.sessions.filter { $0.needs == true }.count
                     if !beside {
                     } else if needing > 0 {
-                        Text("\(needing)").font(.system(size: 12, weight: .bold)).foregroundStyle(.pink)
+                        Text("\(needing)").font(.system(size: 12, weight: .bold)).foregroundStyle(Color.needsYou)
                     } else {
                         let peak = store.limits.flatMap(\.windows).map(\.used).max() ?? 0
                         Image(systemName: "terminal").font(.system(size: 11))
-                            .foregroundStyle(peak >= 95 ? Color.red : peak >= 80 ? .orange : .white.opacity(0.6))
+                            .foregroundStyle(peak >= 95 ? Color.failing : peak >= 80 ? .needsYou : .white.opacity(0.6))
                     }
                 }
             }
@@ -243,7 +307,7 @@ struct NotchView: View {
     var limitsRow: some View {
         HStack(spacing: 16) {
             ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
-                let c = w.used >= 95 ? Color.red : w.used >= 80 ? .orange : .white.opacity(0.6)
+                let c = w.used >= 95 ? Color.failing : w.used >= 80 ? .needsYou : .white.opacity(0.6)
                 HStack(spacing: 6) {
                     Text(label)
                     ZStack(alignment: .leading) {
@@ -290,16 +354,17 @@ struct NotchView: View {
 
     /// "#412 ✓" / "#13 draft ✗": PR number with its CI result; click opens the PR.
     func prLabel(_ pr: PR) -> some View {
-        let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", .purple) : pr.state == "CLOSED" ? (" closed", .gray)
-            : pr.ci == "fail" ? (" ✗", .red) : pr.ci == "pending" ? (" …", .yellow) : pr.ci == "pass" ? (" ✓", .green) : ("", .white.opacity(0.6))
+        let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", .merged) : pr.state == "CLOSED" ? (" closed", .gray)
+            : pr.ci == "fail" ? (" ✗", .failing) : pr.ci == "pending" ? (" …", .caution) : pr.ci == "pass" ? (" ✓", .idle) : ("", .white.opacity(0.6))
         let draft = pr.draft == true && pr.state == "OPEN" ? " draft" : ""
         return Text("#\(String(pr.number))\(draft)\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
+            .modifier(Clickable())
             .onTapGesture { if let u = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(u) } }
     }
 
     func row(_ s: Session) -> some View {
-        let (word, color): (String, Color) = s.needs == true ? ("needs you", .pink) : s.status == "busy" ? ("working", .orange)
-            : s.stale == true ? ("stale", .gray) : ("idle", .green)
+        let (word, color): (String, Color) = s.needs == true ? ("needs you", .needsYou) : s.status == "busy" ? ("working", .working)
+            : s.stale == true ? ("stale", .gray) : ("idle", .idle)
         // the folder is only worth showing when it differs from the repo header (git worktrees)
         let place = (s.project == s.repo ? "" : " · \(s.project)") + (s.branch.map { " · \($0)" } ?? "")
         return HStack(alignment: .top, spacing: 8) {
@@ -311,7 +376,7 @@ struct NotchView: View {
                 }
                 // status in its color, then tool and branch; yellow dot = uncommitted changes
                 HStack(spacing: 5) {
-                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(.yellow))")
+                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(.caution))")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     if let pr = s.pr { prLabel(pr) }
                 }
@@ -327,9 +392,10 @@ struct NotchView: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(.vertical, 4).padding(.trailing, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.pink.opacity(s.needs == true ? 0.16 : 0)))
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.needsYou.opacity(s.needs == true ? 0.16 : 0)))
         .opacity(s.stale == true ? 0.5 : 1)
         .contentShape(Rectangle())
+        .modifier(Clickable())
         .onTapGesture { focus(s) }
     }
 }

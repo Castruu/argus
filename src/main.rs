@@ -20,6 +20,7 @@ struct Session {
     cwd: String,
     repo: String,
     tty: Option<String>,
+    app: Option<String>, // bundle of the terminal or editor the session runs in
     status: String,
     idle_secs: u64,
     last_prompt: String,
@@ -37,8 +38,8 @@ const STALE_SECS: u64 = 86400;
 const GIT_TTL: u64 = 30; // seconds between `git status` runs per folder
 const PR_TTL: u64 = 300; // seconds between GitHub lookups per folder
 
-/// Live pid -> its tty.
-type Procs = HashMap<u64, Option<String>>;
+/// Live pid -> (tty, parent pid, command).
+type Procs = HashMap<u64, (Option<String>, u64, String)>;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -82,17 +83,39 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// One `ps` call for everything: live pids with their tty, and whether Codex runs at all.
+/// One `ps` call for everything: live pids with their tty, parent and command, and whether Codex runs at all.
 fn processes() -> (Procs, bool) {
-    let out = Command::new("ps").args(["-axo", "pid=,tty=,comm="]).output().map(|o| o.stdout).unwrap_or_default();
+    let out = Command::new("ps").args(["-axo", "pid=,ppid=,tty=,comm="]).output().map(|o| o.stdout).unwrap_or_default();
     let (mut procs, mut codex) = (Procs::new(), false);
     for line in String::from_utf8_lossy(&out).lines() {
-        let mut f = line.split_whitespace();
-        let (Some(pid), Some(tty)) = (f.next().and_then(|p| p.parse().ok()), f.next()) else { continue };
-        procs.insert(pid, (tty != "??").then(|| format!("/dev/{tty}")));
-        codex |= f.next().is_some_and(|c| project(c).starts_with("codex"));
+        // three padded columns, then the command, which may contain spaces
+        let mut rest = line;
+        let mut next = || {
+            let t = rest.trim_start();
+            let (field, tail) = t.split_at(t.find(char::is_whitespace).unwrap_or(t.len()));
+            rest = tail;
+            field
+        };
+        let (Ok(pid), Ok(ppid), tty) = (next().parse::<u64>(), next().parse::<u64>(), next()) else { continue };
+        let comm = rest.trim();
+        codex |= project(comm).starts_with("codex");
+        procs.insert(pid, ((tty != "??").then(|| format!("/dev/{tty}")), ppid, comm.to_string()));
     }
     (procs, codex)
+}
+
+/// The app a process runs inside: the first ancestor that lives in an .app bundle, e.g.
+/// "/Applications/Ghostty.app". None for tmux and the like, whose server is detached from any app.
+fn app_of(mut pid: u64, procs: &Procs) -> Option<String> {
+    for _ in 0..16 {
+        let (_, ppid, comm) = procs.get(&pid)?;
+        // Claude Code ships its own launcher as an .app; that is not where the session is shown
+        if let Some(app) = comm.find(".app/").map(|i| &comm[..i + 4]).filter(|a| !a.contains("/claude/")) {
+            return Some(app.to_string());
+        }
+        pid = *ppid;
+    }
+    None
 }
 
 /// Reads what changed in a Claude or Codex transcript into its cache entry.
@@ -273,7 +296,8 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             title,
             cwd,
             repo: String::new(),
-            tty: procs[&pid].clone(),
+            tty: procs[&pid].0.clone(),
+            app: app_of(pid, procs),
             status: meta["status"].as_str().unwrap_or("?").to_string(),
             idle_secs: now().saturating_sub(updated_ms / 1000),
             last_prompt,
@@ -408,7 +432,10 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
     for path in paths {
         // the holder with a terminal is the CLI (the desktop app's server has none); its tty lets
         // click-to-jump find the exact Ghostty tab, wherever the session's folder is
-        let tty = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| procs.get(pid).cloned().flatten());
+        // the holder with a terminal is the CLI; it also tells us which app the session is shown in
+        let holder = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| Some((*pid, procs.get(pid)?.0.clone()?)));
+        let app = holder.as_ref().and_then(|(pid, _)| app_of(*pid, procs));
+        let tty = holder.map(|(_, tty)| tty);
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
@@ -430,6 +457,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
             cwd: entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string(),
             repo: String::new(),
             tty,
+            app,
             status: if idle < 10 { "busy" } else { "idle" }.to_string(),
             idle_secs: idle,
             last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
@@ -449,7 +477,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
 fn to_json(sessions: &[Session]) -> Value {
     let arr: Vec<Value> = sessions.iter().map(|s| json!({
         "tool": s.tool, "id": s.id, "title": s.title, "cwd": s.cwd,
-        "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "status": s.status, "idle_secs": s.idle_secs,
+        "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "app": s.app, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
         "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty, "pr": s.pr,
     })).collect();
@@ -625,7 +653,8 @@ mod tests {
         let rollouts = home.join(".codex/sessions/2026/01/01");
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
         let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1)];
-        let procs = Procs::from([(me as u64, None), (1, None), (2, Some("/dev/ttys042".to_string()))]);
+        let p = |tty: Option<&str>| (tty.map(String::from), 0, String::new());
+        let procs = Procs::from([(me as u64, p(None)), (1, p(None)), (2, p(Some("/dev/ttys042")))]);
         let s = collect(&home, &open, &procs);
         // second run parses only the appended line, and keeps what the cache already knew
         let t = home.join(".claude/projects/-x-proj/abc.jsonl");
