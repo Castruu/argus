@@ -97,7 +97,13 @@ final class Store: ObservableObject {
             let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, ["--limits", "--json"]))
             DispatchQueue.main.async {
                 self.running = false
-                if let limits { self.limits = limits }
+                // a window at 0% is noise (e.g. a tool you do not use); a tool with nothing left is dropped
+                if let limits {
+                    self.limits = limits.compactMap { t in
+                        let used = t.windows.filter { $0.used.rounded() > 0 }
+                        return used.isEmpty ? nil : ToolLimits(tool: t.tool, windows: used)
+                    }
+                }
                 if let sessions { self.update(sessions) }
                 if self.again { self.again = false; self.refresh() }
             }
