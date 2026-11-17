@@ -40,6 +40,8 @@ Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal
 
 The overlay refreshes local data when session files change. Opening it also fetches current Claude and Codex limits in the background; cached values stay visible if a request fails. It stops while the screen is locked or asleep. Each repo shows up to three sessions before scrolling vertically within its own column; the repo heading stays visible, with a count when there are more sessions. With more repos than fit on screen, the panel scrolls sideways.
 
+PR links must use HTTPS and match the displayed PR number. The viewer accepts `github.com` and exact hostnames registered in GitHub CLI’s `hosts.yml` (for example, after `gh auth login --hostname git.example.com`). An unrecognized link shows as a PR number without a link.
+
 A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
 ## Requirements

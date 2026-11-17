@@ -10,10 +10,11 @@ struct Session: Decodable, Identifiable, Equatable {
     var needs, stale, dirty: Bool?
     var branch, waiting_for: String?
     var pr: PR?
+    var pr_open_url: String? // supplied by ccs after host, path and PR number validation
     var app: String? // bundle of the terminal or editor the session runs in
 }
 
-struct PR: Decodable, Equatable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
+struct PR: Decodable, Equatable { let number: Int; let state: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
@@ -463,13 +464,16 @@ struct NotchView: View {
     }
 
     /// "#412 ✓" / "#13 draft ✗": PR number with its CI result; click opens the PR.
-    func prLabel(_ pr: PR) -> some View {
+    @ViewBuilder func prLabel(_ pr: PR, openURL: String?) -> some View {
         let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", p.merged) : pr.state == "CLOSED" ? (" closed", p.stale)
             : pr.ci == "fail" ? (" ✗", p.failing) : pr.ci == "pending" ? (" …", p.caution) : pr.ci == "pass" ? (" ✓", p.idle) : ("", .white.opacity(0.6))
         let draft = pr.draft == true && pr.state == "OPEN" ? " draft" : ""
-        return Text("#\(String(pr.number))\(draft)\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
-            .modifier(Clickable())
-            .onTapGesture { if let u = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(u) } }
+        let label = Text("#\(String(pr.number))\(draft)\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
+        if let url = openURL.flatMap(URL.init(string:)), url.scheme == "https" {
+            label.modifier(Clickable()).onTapGesture { NSWorkspace.shared.open(url) }
+        } else {
+            label
+        }
     }
 
     func row(_ s: Session) -> some View {
@@ -489,7 +493,7 @@ struct NotchView: View {
                 HStack(spacing: 5) {
                     Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color))\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(p.caution))")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    if let pr = s.pr { prLabel(pr) }
+                    if let pr = s.pr { prLabel(pr, openURL: s.pr_open_url) }
                 }
                 if s.stale != true { // stale rows stay compact
                     if let summary = s.summary {
@@ -571,8 +575,8 @@ struct NotchApp {
         s("infra", "Bump Postgres to 17", "idle", 900, "Opened PR #412; CI green, waiting on merge."),
     ]
     (sample[0].branch, sample[0].dirty, sample[1].needs, sample[4].stale) = ("rate-limit", true, true, true)
-    sample[0].pr = PR(number: 412, state: "OPEN", url: nil, ci: "pass")
-    (sample[3].branch, sample[3].pr) = ("fix-checkout", PR(number: 87, state: "OPEN", url: nil, ci: "fail", draft: true))
+    sample[0].pr = PR(number: 412, state: "OPEN", ci: "pass")
+    (sample[3].branch, sample[3].pr) = ("fix-checkout", PR(number: 87, state: "OPEN", ci: "fail", draft: true))
     let notch = CGSize(width: 190, height: 32)
     func save(_ view: some View, _ name: String, height: CGFloat) {
         let framed = view.frame(width: 1000, height: height)

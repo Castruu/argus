@@ -1,6 +1,7 @@
 //! ccs: list active Claude Code and Codex sessions.
 //! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh]
 mod limits;
+mod pr;
 
 use serde_json::{json, Value};
 use std::{
@@ -223,12 +224,13 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
         // Claude sessions record their own PR (pr-link); gh only adds state and CI, looked up by URL.
         // Otherwise use the PR of the branch checked out where the session is now (its worktree, if it
         // moved into one). Default branches rarely have a PR, and stale sessions are not worth a GitHub call.
+        validate_pr(home, &mut s.pr);
         if let Some(url) = s.pr["url"].as_str().map(str::to_string) {
             if !s.stale {
                 let live = pr_state(home, &s.cwd, Some(&url));
                 if !live.is_null() { s.pr = live; }
             }
-        } else if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
+        } else if s.pr.is_null() && !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
             s.pr = pr_state(home, &s.cwd, None);
         }
         // shortcut: ambiguous dialogs stay quiet, add explicit request reasons when Claude exposes them.
@@ -343,6 +345,14 @@ fn git_state(cwd: &str) -> (Option<String>, bool) {
     (branch, text.lines().any(|l| !l.starts_with('#')))
 }
 
+fn validate_pr(home: &Path, pr: &mut Value) {
+    if !pr.is_object() { return }
+    let number = pr["url"].as_str().and_then(|url| pr::number(url, home));
+    if number.is_none() || number != pr["number"].as_u64() {
+        pr["url"] = Value::Null;
+    }
+}
+
 /// Cached PR for `url` if given, else for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
 /// PR_TTL this starts `ccs --fetch-pr` in the background and returns what it has; the next run sees the result.
 fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
@@ -361,11 +371,14 @@ fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
         }
     }
-    fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null)
+    let mut pr = fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    validate_pr(home, &mut pr);
+    pr
 }
 
 /// `ccs --fetch-pr <cwd> <out> [url]`: asks `gh` for that PR (or the current branch's) and writes it (or null) to <out>.
 fn fetch_pr(cwd: &str, out: &Path, url: Option<&str>) {
+    if url.is_some_and(|u| pr::number(u, &home()).is_none()) { return; }
     // launchd starts the overlay without Homebrew on PATH
     let pr = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"].iter()
         .find_map(|gh| Command::new(gh).current_dir(cwd)
@@ -484,6 +497,7 @@ fn to_json(sessions: &[Session]) -> Value {
         "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "app": s.app, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
         "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty, "pr": s.pr,
+        "pr_open_url": s.pr["url"],
     })).collect();
     Value::Array(arr)
 }
