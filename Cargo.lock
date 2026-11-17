@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "claude-sessions-viewer"
+name = "cc-sessions-viewer"
 version = "0.1.0"
 dependencies = [
  "serde_json",

@@ -1,4 +1,4 @@
-# claude-sessions-viewer
+# cc-sessions-viewer
 
 See your active Claude Code and Codex sessions at a glance.
 
@@ -19,7 +19,7 @@ Add to `~/.claude/settings.json`:
 
 ```json
 "hooks": {
-  "Stop": [{ "hooks": [{ "type": "command", "command": "/ABSOLUTE/PATH/claude-sessions-viewer/hooks/summarize.sh" }] }]
+  "Stop": [{ "hooks": [{ "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/summarize.sh" }] }]
 }
 ```
 
