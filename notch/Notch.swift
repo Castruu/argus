@@ -281,16 +281,16 @@ struct NotchView: View {
         VStack(alignment: .leading, spacing: 10) {
             if open {
                 Spacer().frame(height: notch.height - 6)
-                // Counts by state double as the color legend; keep the header compact.
-                HStack(spacing: 14) {
-                    count("working", p.working) { $0.status == "busy" }
-                    count("need you", p.needs) { $0.needs == true }
-                    count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
-                    count("stale", p.stale) { $0.stale == true }
-                    Spacer(minLength: 24)
-                    paletteMenu
-                    soundToggle
-                }.font(.system(size: 11, weight: .semibold))
+                let repos = groups(store.sessions)
+                let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
+                ViewThatFits(in: .horizontal) {
+                    header(showLimits: true, bars: true)
+                    header(showLimits: true)
+                    VStack(alignment: .leading, spacing: 8) {
+                        header(showLimits: false)
+                        if !store.limits.isEmpty { limitsRow(bars: false) }
+                    }
+                }.frame(width: contentWidth)
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
@@ -298,7 +298,7 @@ struct NotchView: View {
                 // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
                 // Hug the content; scroll only on the axis where it outgrows the screen
                 // (sideways for many repos, down for many sessions).
-                let cols = columns(groups(store.sessions))
+                let cols = columns(repos)
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { columnsSize = $0 }
                 let (maxW, maxH) = (room - 36, 520 - notch.height)
                 let (wide, tall) = (columnsSize.width > maxW, columnsSize.height > maxH)
@@ -353,6 +353,40 @@ struct NotchView: View {
         .onHover { h in store.open = h; withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
+    }
+
+    func header(showLimits: Bool, bars: Bool = false) -> some View {
+        HStack(spacing: 14) {
+            count("working", p.working) { $0.status == "busy" }
+            count("need you", p.needs) { $0.needs == true }
+            count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
+            count("stale", p.stale) { $0.stale == true }
+            Spacer(minLength: 24)
+            if showLimits && !store.limits.isEmpty { limitsRow(bars: bars) }
+            paletteMenu
+            soundToggle
+        }.font(.system(size: 11, weight: .semibold))
+    }
+
+    func limitsRow(bars: Bool) -> some View {
+        HStack(spacing: 12) {
+            ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
+                let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
+                let layout = bars ? AnyLayout(HStackLayout(spacing: 6)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                layout {
+                    Text(label)
+                    if bars {
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.15))
+                            Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
+                        }.frame(width: 44, height: 4)
+                    }
+                    Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
+                }
+                .font(.system(size: bars ? 11 : 10, weight: .semibold))
+                .foregroundStyle(c)
+            }
+        }
     }
 
     /// Header icon: click for the next palette, right-click to pick one. Remembered across launches.
@@ -538,17 +572,17 @@ struct NotchApp {
         ToolLimits(tool: "Claude", windows: [.init(label: "5h", used: 16, reset: "3h"), .init(label: "weekly", used: 86, reset: "23h")]),
         ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 12, reset: "4d")]),
     ]
-    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 250)
+    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 270)
     if CommandLine.arguments.contains("--palettes") { // every palette on one sheet, for comparing
         let sheet = VStack(spacing: 0) {
             ForEach(Palette.all) { q in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(q.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white).padding(.leading, 16)
-                    NotchView(store: withLimits, notch: notch, open: true, forcedPalette: q).frame(width: 1000, height: 250)
+                    NotchView(store: withLimits, notch: notch, open: true, forcedPalette: q).frame(width: 1000, height: 270)
                 }.padding(.top, 10)
             }
         }
-        save(sheet, "palettes.png", height: CGFloat(Palette.all.count) * 284)
+        save(sheet, "palettes.png", height: CGFloat(Palette.all.count) * 304)
     }
     save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }

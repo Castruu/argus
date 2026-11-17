@@ -2,7 +2,7 @@ import SwiftUI
 
 @main struct NotchLayoutTests {
     @MainActor static func main() {
-        for count in 1...2 {
+        for count in 1...3 {
             let sessions = (0..<count).map { i in
                 Session(tool: "claude", id: "\(i)", title: "Test session", project: "repo\(i)", repo: "repo\(i)",
                         cwd: "", status: "idle", last_prompt: "continue", idle_secs: 6, summary: nil, tty: nil)
@@ -14,8 +14,13 @@ import SwiftUI
             ]
             let view = NotchView(store: store, notch: CGSize(width: 190, height: 32), open: true)
             guard let image = ImageRenderer(content: view).nsImage else { fatalError("Panel did not render") }
-            let expected: CGFloat = count == 1 ? 300 : 554 // columns, gaps and panel padding
+            let expected = max(300, CGFloat(count) * 268 + 18) // columns, gaps and panel padding
             assert(abs(image.size.width - expected) < 1, "Usage widened \(count) repos to \(image.size.width)pt")
+            store.limits = []
+            let withoutLimits = ImageRenderer(content: view).nsImage!
+            if count < 3 {
+                assert(image.size.height > withoutLimits.size.height, "Compact limits are missing for \(count) repos")
+            }
         }
         print("Notch layout tests passed")
     }
