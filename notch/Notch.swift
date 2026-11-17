@@ -283,12 +283,13 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height - 6)
                 let repos = groups(store.sessions)
                 let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
+                let showBars = contentWidth >= 3 * colW + 36
                 ViewThatFits(in: .horizontal) {
-                    header(showLimits: true, bars: true)
-                    header(showLimits: true)
+                    header(showLimits: true, bars: true, compact: false)
+                    header(showLimits: true, bars: showBars)
                     VStack(alignment: .leading, spacing: 8) {
                         header(showLimits: false)
-                        if !store.limits.isEmpty { limitsRow(bars: false) }
+                        if !store.limits.isEmpty { limitsRow(bars: showBars) }
                     }
                 }.frame(width: contentWidth)
                 if store.sessions.isEmpty {
@@ -355,24 +356,24 @@ struct NotchView: View {
         .padding(.trailing, beside ? trailing : 0)
     }
 
-    func header(showLimits: Bool, bars: Bool = false) -> some View {
+    func header(showLimits: Bool, bars: Bool = false, compact: Bool = true) -> some View {
         HStack(spacing: 14) {
             count("working", p.working) { $0.status == "busy" }
             count("need you", p.needs) { $0.needs == true }
             count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
             count("stale", p.stale) { $0.stale == true }
             Spacer(minLength: 24)
-            if showLimits && !store.limits.isEmpty { limitsRow(bars: bars) }
+            if showLimits && !store.limits.isEmpty { limitsRow(bars: bars, compact: compact) }
             paletteMenu
             soundToggle
         }.font(.system(size: 11, weight: .semibold))
     }
 
-    func limitsRow(bars: Bool) -> some View {
+    func limitsRow(bars: Bool, compact: Bool = true) -> some View {
         HStack(spacing: 12) {
             ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
                 let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
-                let layout = bars ? AnyLayout(HStackLayout(spacing: 6)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                let layout = compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2)) : AnyLayout(HStackLayout(spacing: 6))
                 layout {
                     Text(label)
                     if bars {
@@ -383,7 +384,7 @@ struct NotchView: View {
                     }
                     Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
                 }
-                .font(.system(size: bars ? 11 : 10, weight: .semibold))
+                .font(.system(size: compact ? 10 : 11, weight: .semibold))
                 .foregroundStyle(c)
             }
         }
