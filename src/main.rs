@@ -5,6 +5,7 @@ mod limits;
 use serde_json::{json, Value};
 use std::{
     env, fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -80,6 +81,29 @@ fn read_jsonl(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// Streams a JSONL file one line at a time and parses only the lines `keep` lets through.
+/// Transcripts reach hundreds of MB, mostly tool output: loading them whole cost ~4x the file
+/// size in memory on every refresh. `keep` is a cheap substring check that must never drop a
+/// line the caller needs; the parsed value is still checked by the caller.
+fn scan_jsonl(path: &Path, keep: impl Fn(&str) -> bool, mut each: impl FnMut(Value)) {
+    let Ok(f) = fs::File::open(path) else { return };
+    let mut reader = BufReader::new(f);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(text) = std::str::from_utf8(&line) else { continue };
+        if keep(text) {
+            if let Ok(v) = serde_json::from_str(text) {
+                each(v);
+            }
+        }
+    }
+}
+
 fn pid_alive(pid: u64) -> bool {
     Command::new("kill").args(["-0", &pid.to_string()]).output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -99,15 +123,25 @@ fn claude_sessions(home: &Path) -> Vec<Session> {
         }
         let id = meta["sessionId"].as_str().unwrap_or_default().to_string();
         let cwd = meta["cwd"].as_str().unwrap_or_default().to_string();
-        let lines = find_claude_transcript(home, &id).map(|p| read_jsonl(&p)).unwrap_or_default();
-        let title = lines.iter().rev().find_map(|l| l["customTitle"].as_str())
-            .or_else(|| lines.iter().rev().find_map(|l| l["aiTitle"].as_str()))
-            .or(meta["name"].as_str()).unwrap_or("?").to_string();
-        let last_prompt = lines.iter().rev()
-            .filter(|l| l["type"] == "user")
-            .filter_map(|l| l["message"]["content"].as_str())
-            .find(|t| !t.starts_with('<'))
-            .unwrap_or("").to_string();
+        let (mut custom_title, mut ai_title, mut last_prompt) = (None, None, String::new());
+        if let Some(p) = find_claude_transcript(home, &id) {
+            // titles, and user prompts typed as plain text (tool results are arrays, skip them unparsed)
+            let keep = |l: &str| l.contains("Title\"") || (l.contains("\"type\":\"user\"") && l.contains("\"content\":\""));
+            scan_jsonl(&p, keep, |l| {
+                if let Some(t) = l["customTitle"].as_str() {
+                    custom_title = Some(t.to_string());
+                }
+                if let Some(t) = l["aiTitle"].as_str() {
+                    ai_title = Some(t.to_string());
+                }
+                if l["type"] == "user" {
+                    if let Some(t) = l["message"]["content"].as_str().filter(|t| !t.starts_with('<')) {
+                        last_prompt = t.to_string();
+                    }
+                }
+            });
+        }
+        let title = custom_title.or(ai_title).or(meta["name"].as_str().map(String::from)).unwrap_or("?".into());
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
         out.push(Session {
             tool: "claude",
@@ -161,29 +195,39 @@ fn open_codex_rollouts() -> Vec<PathBuf> {
 }
 
 fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
-    let titles = read_jsonl(&home.join(".codex/session_index.jsonl"));
+    let index = home.join(".codex/session_index.jsonl");
     let mut out = vec![];
     for path in open {
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
-        let lines = read_jsonl(path);
-        let Some(meta) = lines.iter().find(|l| l["type"] == "session_meta") else { continue };
-        let meta = &meta["payload"];
+        let (mut meta, mut last_prompt) = (None::<Value>, String::new());
+        let keep = |l: &str| l.contains("\"session_meta\"") || l.contains("\"role\":\"user\"");
+        scan_jsonl(path, keep, |mut l| {
+            if meta.is_none() && l["type"] == "session_meta" {
+                meta = Some(l["payload"].take());
+            } else if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
+                if let Some(t) = l["payload"]["content"][0]["text"].as_str()
+                    .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
+                    last_prompt = t.to_string();
+                }
+            }
+        });
+        let Some(meta) = meta else { continue };
+        let meta = &meta;
         // subagent = internal reviewer threads; exec = headless `codex exec` runs
         if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
             continue;
         }
         let id = meta["id"].as_str().unwrap_or_default().to_string();
-        let title = titles.iter().rev()
-            .find(|t| t["id"] == id.as_str())
-            .and_then(|t| t["thread_name"].as_str())
-            .unwrap_or("?").to_string();
-        let last_prompt = lines.iter().rev()
-            .filter(|l| l["payload"]["type"] == "message" && l["payload"]["role"] == "user")
-            .filter_map(|l| l["payload"]["content"][0]["text"].as_str())
-            .find(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md"))
-            .unwrap_or("").to_string();
+        let mut title = "?".to_string();
+        scan_jsonl(&index, |l| l.contains(id.as_str()), |t| {
+            if t["id"] == id.as_str() {
+                if let Some(n) = t["thread_name"].as_str() {
+                    title = n.to_string();
+                }
+            }
+        });
         out.push(Session {
             tool: "codex",
             id,
@@ -289,5 +333,32 @@ mod tests {
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
         assert_eq!((x.title.as_str(), x.last_prompt.as_str(), x.repo.as_str()), ("API tests", "add tests", "api"));
         assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
+    }
+
+    #[test]
+    fn streams_transcripts_keeping_newest_prompt_and_custom_title() {
+        let home = env::temp_dir().join(format!("ccs-stream-{}", std::process::id()));
+        let w = |p: &str, c: &str| {
+            let f = home.join(p);
+            fs::create_dir_all(f.parent().unwrap()).unwrap();
+            fs::write(f, c).unwrap();
+        };
+        let me = std::process::id();
+        w(".claude/sessions/1.json", &format!(r#"{{"pid":{me},"sessionId":"s1","cwd":"/x/proj","status":"busy"}}"#));
+        let big = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"BIG"}]}}"#.replace("BIG", &"x".repeat(100_000));
+        w(".claude/projects/-x-proj/s1.jsonl", &[
+            r#"{"type":"user","message":{"content":"old ask"}}"#,
+            r#"{"type":"ai-title","aiTitle":"AI name"}"#,
+            r#"{"type":"custom-title","customTitle":"My name"}"#,
+            &big,
+            r#"{"type":"user","message":{"content":"new ask"}}"#,
+            r#"{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}"#,
+            r#"{"type":"ai-title","aiTitle":"Later AI name"}"#,
+            r#"{"type":"user","message":{"content":"half-writ"#, // still being written
+        ].join("\n"));
+        let s = claude_sessions(&home);
+        fs::remove_dir_all(&home).ok();
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].title.as_str(), s[0].last_prompt.as_str()), ("My name", "new ask"));
     }
 }
