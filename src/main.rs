@@ -20,6 +20,7 @@ struct Session {
     cwd: String,
     repo: String,
     tty: Option<String>,
+    app: Option<String>, // bundle of the terminal or editor the session runs in
     status: String,
     idle_secs: u64,
     last_prompt: String,
@@ -37,8 +38,8 @@ const STALE_SECS: u64 = 86400;
 const GIT_TTL: u64 = 30; // seconds between `git status` runs per folder
 const PR_TTL: u64 = 300; // seconds between GitHub lookups per folder
 
-/// Live pid -> its tty.
-type Procs = HashMap<u64, Option<String>>;
+/// Live pid -> (tty, parent pid, command).
+type Procs = HashMap<u64, (Option<String>, u64, String)>;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -82,20 +83,42 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// One `ps` call for everything: live pids with their tty, and whether Codex runs at all.
+/// One `ps` call for everything: live pids with their tty, parent and command, and whether Codex runs at all.
 fn processes() -> (Procs, bool) {
-    let out = Command::new("ps").args(["-axo", "pid=,tty=,comm="]).output().map(|o| o.stdout).unwrap_or_default();
+    let out = Command::new("ps").args(["-axo", "pid=,ppid=,tty=,comm="]).output().map(|o| o.stdout).unwrap_or_default();
     let (mut procs, mut codex) = (Procs::new(), false);
     for line in String::from_utf8_lossy(&out).lines() {
-        let mut f = line.split_whitespace();
-        let (Some(pid), Some(tty)) = (f.next().and_then(|p| p.parse().ok()), f.next()) else { continue };
-        procs.insert(pid, (tty != "??").then(|| format!("/dev/{tty}")));
-        codex |= f.next().is_some_and(|c| project(c).starts_with("codex"));
+        // three padded columns, then the command, which may contain spaces
+        let mut rest = line;
+        let mut next = || {
+            let t = rest.trim_start();
+            let (field, tail) = t.split_at(t.find(char::is_whitespace).unwrap_or(t.len()));
+            rest = tail;
+            field
+        };
+        let (Ok(pid), Ok(ppid), tty) = (next().parse::<u64>(), next().parse::<u64>(), next()) else { continue };
+        let comm = rest.trim();
+        codex |= project(comm).starts_with("codex");
+        procs.insert(pid, ((tty != "??").then(|| format!("/dev/{tty}")), ppid, comm.to_string()));
     }
     (procs, codex)
 }
 
-/// Reads what changed in a transcript into its cache entry (title, last_prompt, asks).
+/// The app a process runs inside: the first ancestor that lives in an .app bundle, e.g.
+/// "/Applications/Ghostty.app". None for tmux and the like, whose server is detached from any app.
+fn app_of(mut pid: u64, procs: &Procs) -> Option<String> {
+    for _ in 0..16 {
+        let (_, ppid, comm) = procs.get(&pid)?;
+        // Claude Code ships its own launcher as an .app; that is not where the session is shown
+        if let Some(app) = comm.find(".app/").map(|i| &comm[..i + 4]).filter(|a| !a.contains("/claude/")) {
+            return Some(app.to_string());
+        }
+        pid = *ppid;
+    }
+    None
+}
+
+/// Reads what changed in a Claude or Codex transcript into its cache entry.
 /// Transcripts are append-only, so only the bytes added since the last run are parsed.
 fn scan_transcript(path: &Path, entry: &mut Value) {
     let Ok(mut f) = fs::File::open(path) else { return };
@@ -123,6 +146,36 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         }
         from += n as u64;
         let Ok(l) = serde_json::from_slice::<Value>(&line) else { continue };
+        if l["type"] == "event_msg" {
+            let payload = &l["payload"];
+            match payload["type"].as_str() {
+                Some("task_started") => {
+                    entry["status"] = "busy".into();
+                    entry["active_turn"] = payload["turn_id"].clone();
+                }
+                Some("task_complete" | "turn_aborted")
+                    if entry["active_turn"].is_null() || payload["turn_id"] == entry["active_turn"] => {
+                    entry["status"] = "idle".into();
+                    entry["active_turn"] = Value::Null;
+                }
+                _ => {}
+            }
+        }
+        if l["type"] == "session_meta" && entry["meta"].is_null() {
+            let m = &l["payload"];
+            entry["meta"] = json!({"id": m["id"], "cwd": m["cwd"], "source": m["source"]});
+        }
+        if l["type"] == "turn_context" {
+            if let Some(c) = l["payload"]["cwd"].as_str() {
+                entry["cwd"] = c.into();
+            }
+        }
+        if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
+            if let Some(t) = l["payload"]["content"][0]["text"].as_str()
+                .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
+                entry["last_prompt"] = t.chars().take(300).collect::<String>().into();
+            }
+        }
         if let Some(t) = l["aiTitle"].as_str() {
             entry["title"] = t.into();
         }
@@ -153,11 +206,11 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &Value| v["v"] == 3 && v["t"].is_object() && v["git"].is_object()) // v3: transcripts also yield pr-link and cwd
-        .unwrap_or_else(|| json!({"v": 3, "t": {}, "git": {}}));
+        .filter(|v: &Value| v["v"] == 4 && v["t"].is_object() && v["git"].is_object()) // v4: replay Codex lifecycle events
+        .unwrap_or_else(|| json!({"v": 4, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
-    out.extend(codex_sessions(home, codex_open, procs));
+    out.extend(codex_sessions(home, codex_open, procs, &mut cache));
     for s in &mut out {
         let g = &mut cache["git"][s.cwd.as_str()];
         if now().saturating_sub(g["at"].as_u64().unwrap_or(0)) > GIT_TTL {
@@ -201,7 +254,8 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     }
     out.sort_by(|a, b| (&a.repo, !a.needs, a.idle_secs).cmp(&(&b.repo, !b.needs, b.idle_secs)));
     // forget closed sessions, then save only if something changed
-    cache["t"].as_object_mut().unwrap().retain(|k, _| out.iter().any(|s| &s.id == k));
+    cache["t"].as_object_mut().unwrap().retain(|k, _|
+        out.iter().any(|s| &s.id == k) || codex_open.iter().any(|(p, _)| p.to_str() == Some(k)));
     cache["git"].as_object_mut().unwrap().retain(|k, _| out.iter().any(|s| &s.cwd == k));
     if cache != old {
         let tmp = cache_path.with_extension(format!("{}.tmp", std::process::id()));
@@ -257,7 +311,8 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             title,
             cwd,
             repo: String::new(),
-            tty: procs[&pid].clone(),
+            tty: procs[&pid].0.clone(),
+            app: app_of(pid, procs),
             status: meta["status"].as_str().unwrap_or("?").to_string(),
             idle_secs: now().saturating_sub(updated_ms / 1000),
             last_prompt,
@@ -380,76 +435,47 @@ fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
     open
 }
 
-fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Session> {
+fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &mut Value) -> Vec<Session> {
+    if open.is_empty() { return vec![]; }
     let index = home.join(".codex/session_index.jsonl");
+    let titles: HashMap<String, String> = read_jsonl(&index, |_| true)
+        .filter_map(|t| Some((t["id"].as_str()?.to_string(), t["thread_name"].as_str()?.to_string())))
+        .collect(); // later entries replace earlier titles
     let mut out = vec![];
     let mut paths: Vec<&PathBuf> = open.iter().map(|(p, _)| p).collect();
     paths.dedup(); // `open` is sorted, so one entry per file even if several processes hold it
     for path in paths {
         // the holder with a terminal is the CLI (the desktop app's server has none); its tty lets
         // click-to-jump find the exact Ghostty tab, wherever the session's folder is
-        let tty = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| procs.get(pid).cloned().flatten());
+        // the holder with a terminal is the CLI; it also tells us which app the session is shown in
+        let holder = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| Some((*pid, procs.get(pid)?.0.clone()?)));
+        let app = holder.as_ref().and_then(|(pid, _)| app_of(*pid, procs));
+        let tty = holder.map(|(_, tty)| tty);
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
-        let (mut meta, mut last_prompt) = (None::<Value>, String::new());
-        // Match tokens, not key/value spacing; parsed fields below decide which lines count.
-        let mut turn_cwd = None::<String>;
-        let mut status = "idle";
-        let mut active_turn = None::<String>;
-        for l in read_jsonl(path, |l| {
-            l.contains("\"session_meta\"") || l.contains("\"user\"") || l.contains("\"turn_context\"")
-                || l.contains("\"task_started\"") || l.contains("\"task_complete\"") || l.contains("\"turn_aborted\"")
-        }) {
-            if l["type"] == "event_msg" {
-                let payload = &l["payload"];
-                match payload["type"].as_str() {
-                    Some("task_started") => {
-                        status = "busy";
-                        active_turn = payload["turn_id"].as_str().map(String::from);
-                    }
-                    Some("task_complete" | "turn_aborted")
-                        if active_turn.is_none() || payload["turn_id"].as_str() == active_turn.as_deref() => {
-                        status = "idle";
-                        active_turn = None;
-                    }
-                    _ => {}
-                }
-            }
-            if meta.is_none() && l["type"] == "session_meta" {
-                meta = Some(l["payload"].clone());
-            }
-            if l["type"] == "turn_context" {
-                turn_cwd = l["payload"]["cwd"].as_str().map(String::from).or(turn_cwd); // each turn records its folder
-            }
-            if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
-                if let Some(t) = l["payload"]["content"][0]["text"].as_str()
-                    .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
-                    last_prompt = t.to_string();
-                }
-            }
-        }
-        let Some(meta) = meta else { continue };
+        let entry = &mut cache["t"][path.to_string_lossy().as_ref()];
+        if entry.is_null() { *entry = json!({"path": path.to_string_lossy()}); }
+        scan_transcript(path, entry);
+        let meta = &entry["meta"];
+        if !meta.is_object() { continue; }
         // subagent = internal reviewer threads; exec = headless `codex exec` runs
         if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
             continue;
         }
         let id = meta["id"].as_str().unwrap_or_default().to_string();
-        let title = read_jsonl(&index, |_| true)
-            .filter(|t| t["id"] == id.as_str())
-            .last()
-            .and_then(|t| t["thread_name"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "?".to_string());
+        let title = titles.get(&id).cloned().unwrap_or_else(|| "?".to_string());
         out.push(Session {
             tool: "codex",
             id,
             title,
-            cwd: turn_cwd.or_else(|| meta["cwd"].as_str().map(String::from)).unwrap_or_default(),
+            cwd: entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string(),
             repo: String::new(),
             tty,
-            status: status.to_string(),
+            app,
+            status: entry["status"].as_str().unwrap_or("idle").to_string(),
             idle_secs: idle,
-            last_prompt,
+            last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
             summary: None,
             waiting_for: None,
             asks: false,
@@ -466,7 +492,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Se
 fn to_json(sessions: &[Session]) -> Value {
     let arr: Vec<Value> = sessions.iter().map(|s| json!({
         "tool": s.tool, "id": s.id, "title": s.title, "cwd": s.cwd,
-        "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "status": s.status, "idle_secs": s.idle_secs,
+        "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "app": s.app, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
         "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty, "pr": s.pr,
     })).collect();
@@ -574,10 +600,34 @@ mod tests {
             r#"{"id":"cx1","thread_name":"Old title"}"#, "\n",
             r#"{"id": "cx1", "thread_name": "Newest title"}"#, "\n",
         )).unwrap();
-        let sessions = codex_sessions(&home, &[(codex, 0)], &Procs::new());
+        let open = [(codex.clone(), 0)];
+        let mut cache = json!({"t": {}});
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].last_prompt, "spaced codex prompt");
         assert_eq!(sessions[0].title, "Newest title");
+        let key = codex.to_string_lossy();
+        let offset = cache["t"][key.as_ref()]["len"].as_u64().unwrap();
+        assert!(offset < fs::metadata(&codex).unwrap().len(), "retry the partial Codex line");
+        codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(cache["t"][key.as_ref()]["len"], offset);
+        let prompt = "é".repeat(500);
+        let tail = format!("\"}}]}}}}\n{}\n{}\n",
+            json!({"payload": {"type": "message", "role": "user", "content": [{"text": prompt}]}}),
+            json!({"type": "turn_context", "payload": {"cwd": "/x/worktree"}}));
+        fs::OpenOptions::new().append(true).open(&codex).unwrap().write_all(tail.as_bytes()).unwrap();
+        fs::OpenOptions::new().append(true).open(home.join(".codex/session_index.jsonl")).unwrap()
+            .write_all(b"{\"id\":\"cx1\",\"thread_name\":\"Renamed\"}\n").unwrap();
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(sessions[0].last_prompt, "é".repeat(300));
+        assert_eq!(sessions[0].cwd, "/x/worktree");
+        assert_eq!(sessions[0].title, "Renamed");
+        assert_eq!(cache["t"][key.as_ref()]["len"], fs::metadata(&codex).unwrap().len());
+        // Rewrites must discard the previous prompt and turn's folder.
+        fs::write(&codex, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx1\",\"cwd\":\"/new\",\"source\":\"cli\"}}\n").unwrap();
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(sessions[0].cwd, "/new");
+        assert!(sessions[0].last_prompt.is_empty());
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -590,15 +640,26 @@ mod tests {
         let append = |event: Value| {
             writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{event}").unwrap();
         };
-        let status = || codex_sessions(&home, &open, &Procs::new()).remove(0).status;
+        let status = || collect(&home, &open, &Procs::new()).remove(0).status;
         fs::write(&path, concat!(
             r#"{"type":"session_meta","payload":{"id":"cx","source":"cli"}}"#, "\n",
             r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#, "\n",
         )).unwrap();
+        let cache_path = home.join(".cache/ccs/cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let mut legacy = json!({"v": 3, "t": {}, "git": {}});
+        legacy["t"][path.to_string_lossy().as_ref()] = json!({
+            "path": path.to_string_lossy(), "len": fs::metadata(&path).unwrap().len(),
+            "meta": {"id": "cx", "source": "cli"}
+        });
+        fs::write(&cache_path, legacy.to_string()).unwrap();
         let old = UNIX_EPOCH + Duration::from_secs(now() - 120);
         fs::File::options().write(true).open(&path).unwrap()
             .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
         assert_eq!(status(), "busy", "a silent running turn must not trigger completion");
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache["v"], 4, "replay old cache entries to recover the active turn");
+        assert_eq!(status(), "busy", "keep the active turn across cached refreshes");
         append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
         assert_eq!(status(), "idle");
         append(json!({"type":"event_msg","payload":{"type":"token_count"}}));
@@ -609,6 +670,15 @@ mod tests {
         assert_eq!(status(), "busy", "an earlier turn cannot end the active turn");
         append(json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"two"}}));
         assert_eq!(status(), "idle");
+        append(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"three"}}));
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(
+            br#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"three""#
+        ).unwrap();
+        assert_eq!(status(), "busy", "retry partial completion events on the next refresh");
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"}}\n").unwrap();
+        assert_eq!(status(), "idle");
+        fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx\",\"source\":\"cli\"}}\n").unwrap();
+        assert_eq!(status(), "idle", "rewriting the transcript discards cached turn state");
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -649,7 +719,8 @@ mod tests {
         let rollouts = home.join(".codex/sessions/2026/01/01");
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
         let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1)];
-        let procs = Procs::from([(me as u64, None), (1, None), (2, Some("/dev/ttys042".to_string()))]);
+        let p = |tty: Option<&str>| (tty.map(String::from), 0, String::new());
+        let procs = Procs::from([(me as u64, p(None)), (1, p(None)), (2, p(Some("/dev/ttys042")))]);
         let s = collect(&home, &open, &procs);
         // second run parses only the appended line, and keeps what the cache already knew
         let t = home.join(".claude/projects/-x-proj/abc.jsonl");
@@ -657,6 +728,10 @@ mod tests {
         let again = collect(&home, &open, &procs);
         let a = again.iter().find(|s| s.id == "abc").unwrap();
         assert_eq!((a.title.as_str(), a.last_prompt.as_str(), a.asks), ("Fix login v2", "first ask", true));
+        let cache: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/cache.json")).unwrap()).unwrap();
+        let codex_path = rollouts.join("rollout-1.jsonl");
+        assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
+            "keep the Codex transcript offset between refresh processes");
         fs::remove_dir_all(&home).ok();
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();

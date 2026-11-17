@@ -2,7 +2,7 @@
 import AppKit
 import SwiftUI
 
-struct Session: Decodable, Identifiable {
+struct Session: Decodable, Identifiable, Equatable {
     let tool, id, title, project, repo, cwd, status, last_prompt: String
     let idle_secs: Int
     let summary, tty: String?
@@ -10,25 +10,132 @@ struct Session: Decodable, Identifiable {
     var needs, stale, dirty: Bool?
     var branch, waiting_for: String?
     var pr: PR?
+    var app: String? // bundle of the terminal or editor the session runs in
 }
 
-struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
+struct PR: Decodable, Equatable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
-/// Stable color per repo name (String.hashValue is randomized per launch).
-func repoColor(_ repo: String) -> Color {
-    let h = repo.utf8.reduce(UInt32(5381)) { ($0 &* 33) &+ UInt32($1) }
-    return Color(hue: Double(h % 360) / 360, saturation: 0.65, brightness: 0.95)
+/// Repos on screen, sorted by name; set by the Store on every update.
+nonisolated(unsafe) var repoNames: [String] = []
+
+/// Stable hash per repo name (String.hashValue is randomized per launch).
+func repoHash(_ repo: String) -> UInt32 { repo.utf8.reduce(UInt32(5381)) { ($0 &* 33) &+ UInt32($1) } }
+
+func hex(_ v: UInt32) -> Color {
+    Color(red: Double(v >> 16 & 0xFF) / 255, green: Double(v >> 8 & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
 }
 
+/// Every color the panel uses. Pick one with the palette icon in the panel header (click for the next,
+/// right-click for the list; remembered), or `--palette <id>` for one run.
+struct Palette: Identifiable {
+    let id, name: String
+    let repo: (String) -> Color
+    let working, needs, idle, stale: Color
+    let caution: Color // pending checks, uncommitted changes
+    let failing: Color // failing checks, usage over 95%
+    let warn: Color    // usage over 80%
+    let merged: Color
+    var pass: Color { idle }
+
+    /// One cool family for the states, plus a single warm color kept for things that are broken.
+    /// Repos are spread evenly from green through blue to violet over the repos on screen, so
+    /// neighbours never look alike; pastel, because the saturated hues belong to the states.
+    static let cool = Palette(id: "cool", name: "Cool",
+        repo: { repo in
+            let i = Double(repoNames.firstIndex(of: repo) ?? 0)
+            return Color(hue: 0.30 + 0.50 * (i + 0.5) / Double(max(repoNames.count, 1)), saturation: 0.38, brightness: 0.97)
+        },
+        working: Color(hue: 0.57, saturation: 0.72, brightness: 1.00),  // sky blue
+        needs: Color(hue: 0.76, saturation: 0.55, brightness: 1.00),    // violet
+        idle: Color(hue: 0.40, saturation: 0.62, brightness: 0.86),     // green
+        stale: .gray,
+        caution: Color(hue: 0.48, saturation: 0.65, brightness: 0.92),  // teal
+        failing: Color(hue: 0.01, saturation: 0.62, brightness: 1.00),  // coral
+        warn: Color(hue: 0.76, saturation: 0.55, brightness: 1.00),
+        merged: Color(hue: 0.48, saturation: 0.65, brightness: 0.92))
+
+    /// Six hand-picked muted tones for repos; amber, rose and sage for the states.
+    static let soft = Palette(id: "soft", name: "Soft",
+        repo: { [0x88C0D0, 0x81A1C1, 0xB48EAD, 0xA3BE8C, 0xEBCB8B, 0xD08770].map(hex)[Int(repoHash($0) % 360 / 60)] },
+        working: hex(0xEBCB8B), needs: hex(0xE06C75), idle: hex(0xA3BE8C), stale: hex(0x6B7385),
+        caution: hex(0xEBCB8B), failing: hex(0xE06C75), warn: hex(0xEBCB8B), merged: hex(0xB48EAD))
+
+    /// Repos in white; color only where something needs a look: working, needs you, failing, high usage.
+    static let focus = Palette(id: "focus", name: "Focus",
+        repo: { _ in .white.opacity(0.7) },
+        working: hex(0xF2B45A), needs: hex(0xFF6B8B), idle: .white.opacity(0.45), stale: .white.opacity(0.25),
+        caution: hex(0xF2B45A), failing: hex(0xFF6B8B), warn: hex(0xF2B45A), merged: .white.opacity(0.55))
+
+    /// The original: any hue on the wheel per repo, classic traffic-light states.
+    static let vivid = Palette(id: "vivid", name: "Vivid",
+        repo: { Color(hue: Double(repoHash($0) % 360) / 360, saturation: 0.65, brightness: 0.95) },
+        working: .orange, needs: .pink, idle: .green, stale: .gray,
+        caution: .yellow, failing: .red, warn: .orange, merged: .purple)
+
+    static let all = [cool, soft, focus, vivid]
+    static func named(_ id: String) -> Palette { all.first { $0.id == id } ?? .cool }
+}
+
+/// `--palette <id>` wins for this run; otherwise the last pick from the header icon.
+let paletteFlag: String? = CommandLine.arguments.firstIndex(of: "--palette")
+    .flatMap { CommandLine.arguments.indices.contains($0 + 1) ? CommandLine.arguments[$0 + 1] : nil }
+
+/// Marks something as clickable: open-hand cursor and a faint highlight under the mouse.
+struct Clickable: ViewModifier {
+    @State private var hover = false
+    func body(content: Content) -> some View {
+        let lit = content
+            .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(hover ? 0.09 : 0)))
+            .onHover { inside in
+                hover = inside
+                // set, not push/pop: a row can vanish while hovered, which would leave a pushed cursor stuck.
+                // macOS only honors this while the overlay is the active app; the highlight always shows.
+                (inside ? NSCursor.openHand : NSCursor.arrow).set()
+            }
+        if #available(macOS 15, *) { lit.pointerStyle(.grabIdle) } else { lit }
+    }
+}
+
+/// VS Code and its forks, by app name -> folder under ~/Library/Application Support.
+let editors = ["Visual Studio Code": "Code", "Visual Studio Code - Insiders": "Code - Insiders",
+               "Cursor": "Cursor", "Windsurf": "Windsurf", "VSCodium": "VSCodium"]
+
+/// The open folder or workspace file that contains `cwd`, read from the editor's own window list.
+func editorWindow(support: String, containing cwd: String) -> String? {
+    let path = NSHomeDirectory() + "/Library/Application Support/\(support)/User/globalStorage/storage.json"
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let state = json["windowsState"] as? [String: Any] else { return nil }
+    return editorWindow(state: state, containing: cwd)
+}
+
+/// Brings the session forward in whatever app runs it.
 func focus(_ s: Session) {
-    // without Ghostty, `tell application "Ghostty"` would pop a "Where is Ghostty?" picker, so do nothing
-    guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") != nil else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    p.arguments = [binDir.appendingPathComponent("focus.applescript").path, s.tty ?? "", s.cwd]
-    try? p.run()
+    func script(_ file: String) { // these find the exact tab by tty (or working directory)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = [binDir.appendingPathComponent(file).path, s.tty ?? "", s.cwd]
+        try? p.run()
+    }
+    guard let app = s.app.map({ URL(fileURLWithPath: $0) }) else {
+        // no app found (tmux, Codex): Ghostty by tty or cwd, as before. Without Ghostty,
+        // `tell application "Ghostty"` would pop a "Where is Ghostty?" picker, so do nothing.
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") != nil { script("focus.applescript") }
+        return
+    }
+    let name = app.deletingPathExtension().lastPathComponent
+    if name == "Ghostty" {
+        script("focus.applescript")
+    } else if name == "Terminal" {
+        script("focus-terminal.applescript")
+    } else if let support = editors[name], let target = editorWindow(support: support, containing: s.cwd) {
+        // Opening an already-open folder or workspace file brings its window forward.
+        NSWorkspace.shared.open([URL(fileURLWithPath: target)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    } else {
+        NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+    }
 }
 
 final class Store: ObservableObject {
@@ -46,7 +153,7 @@ final class Store: ObservableObject {
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
-    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished }
+    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished; repoNames = Set(sample.map(\.repo)).sorted() }
 
     init() {
         refresh()
@@ -99,10 +206,11 @@ final class Store: ObservableObject {
                 self.running = false
                 // a window at 0% is noise (e.g. a tool you do not use); a tool with nothing left is dropped
                 if let limits {
-                    self.limits = limits.compactMap { t in
+                    let visible = limits.compactMap { t -> ToolLimits? in
                         let used = t.windows.filter { $0.used.rounded() > 0 }
                         return used.isEmpty ? nil : ToolLimits(tool: t.tool, windows: used)
                     }
+                    if self.limits != visible { self.limits = visible }
                 }
                 if let sessions { self.update(sessions) }
                 if self.again { self.again = false; self.refresh() }
@@ -111,10 +219,12 @@ final class Store: ObservableObject {
     }
 
     func update(_ new: [Session]) {
+        guard !loaded || sessions != new else { return }
         let wasBusy = Set(sessions.filter { $0.status == "busy" }.map(\.id))
         let wasNeeding = Set(sessions.filter { $0.needs == true }.map(\.id))
         let first = !loaded
         (sessions, loaded) = (new, true)
+        repoNames = Set(new.map(\.repo)).sorted()
         guard !first else { return } // no chimes for what was already there at launch
         // "needs you" (Glass) wins over "finished" (Tink)
         let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
@@ -128,8 +238,8 @@ final class Store: ObservableObject {
 }
 
 /// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
-struct ToolLimits: Decodable {
-    struct Window: Decodable {
+struct ToolLimits: Decodable, Equatable {
+    struct Window: Decodable, Equatable {
         let label: String
         let used: Double
         let reset: String?
@@ -160,6 +270,9 @@ struct NotchView: View {
     var room: CGFloat = 1400 // width available to the open panel
     @State var open = false
     @State private var columnsSize: CGSize = .zero
+    @AppStorage("palette") private var paletteID = "cool"
+    var forcedPalette: Palette? = nil // snapshots
+    var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -167,12 +280,13 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height - 6)
                 // header: counts by state (doubles as the color legend) on the left, usage on the right
                 HStack(spacing: 14) {
-                    count("working", .orange) { $0.status == "busy" }
-                    count("need you", .pink) { $0.needs == true }
-                    count("idle", .green) { $0.status != "busy" && $0.needs != true && $0.stale != true }
-                    count("stale", .gray) { $0.stale == true }
+                    count("working", p.working) { $0.status == "busy" }
+                    count("need you", p.needs) { $0.needs == true }
+                    count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
+                    count("stale", p.stale) { $0.stale == true }
                     Spacer(minLength: 24)
                     if !store.limits.isEmpty { limitsRow }
+                    paletteMenu
                 }.font(.system(size: 11, weight: .semibold))
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
@@ -196,16 +310,17 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height)
                 HStack(spacing: 6) {
                     Image(systemName: f.needs == true ? "bell.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(f.needs == true ? .pink : repoColor(f.repo))
+                        .foregroundStyle(f.needs == true ? p.needs : p.repo(f.repo))
                     Text("\(f.repo): \(f.title)\(f.needs == true ? " needs you" : "")").font(.system(size: 12, weight: .medium)).lineLimit(1)
                 }
                 .padding(.horizontal, 14).padding(.bottom, 8)
+                .modifier(Clickable())
                 .onTapGesture { focus(f) }
             } else {
                 // collapsed: one dot per busy session, sitting under the notch
                 HStack(spacing: 3) {
                     ForEach(store.sessions.filter { $0.status == "busy" || $0.needs == true }) { s in
-                        Circle().fill(s.needs == true ? .pink : repoColor(s.repo)).frame(width: 4, height: 4)
+                        Circle().fill(s.needs == true ? p.needs : p.repo(s.repo)).frame(width: 4, height: 4)
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 3)
                 .overlay {
@@ -214,11 +329,11 @@ struct NotchView: View {
                     let needing = store.sessions.filter { $0.needs == true }.count
                     if !beside {
                     } else if needing > 0 {
-                        Text("\(needing)").font(.system(size: 12, weight: .bold)).foregroundStyle(.pink)
+                        Text("\(needing)").font(.system(size: 12, weight: .bold)).foregroundStyle(p.needs)
                     } else {
                         let peak = store.limits.flatMap(\.windows).map(\.used).max() ?? 0
                         Image(systemName: "terminal").font(.system(size: 11))
-                            .foregroundStyle(peak >= 95 ? Color.red : peak >= 80 ? .orange : .white.opacity(0.6))
+                            .foregroundStyle(peak >= 95 ? p.failing : peak >= 80 ? p.warn : .white.opacity(0.6))
                     }
                 }
             }
@@ -241,7 +356,7 @@ struct NotchView: View {
     var limitsRow: some View {
         HStack(spacing: 16) {
             ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
-                let c = w.used >= 95 ? Color.red : w.used >= 80 ? .orange : .white.opacity(0.6)
+                let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
                 HStack(spacing: 6) {
                     Text(label)
                     ZStack(alignment: .leading) {
@@ -256,13 +371,31 @@ struct NotchView: View {
         }
     }
 
+    /// Header icon: click for the next palette, right-click to pick one. Remembered across launches.
+    var paletteMenu: some View {
+        Image(systemName: "paintpalette").font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+            .help("Colors: \(p.name). Click for the next, right-click to choose")
+            .modifier(Clickable())
+            .onTapGesture {
+                let all = Palette.all
+                paletteID = all[((all.firstIndex { $0.id == p.id } ?? 0) + 1) % all.count].id
+            }
+            .contextMenu {
+                ForEach(Palette.all) { q in
+                    Button { paletteID = q.id } label: {
+                        if q.id == p.id { Label(q.name, systemImage: "checkmark") } else { Text(q.name) }
+                    }
+                }
+            }
+    }
+
     let colW: CGFloat = 250
 
     func columns(_ gs: [(String, [Session])]) -> some View {
         HStack(alignment: .top, spacing: 18) {
             ForEach(gs, id: \.0) { repo, items in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
+                    Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(p.repo(repo))
                     ForEach(items) { s in row(s) }
                 }
                 .frame(width: colW, alignment: .topLeading)
@@ -288,20 +421,21 @@ struct NotchView: View {
 
     /// "#412 ✓" / "#13 draft ✗": PR number with its CI result; click opens the PR.
     func prLabel(_ pr: PR) -> some View {
-        let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", .purple) : pr.state == "CLOSED" ? (" closed", .gray)
-            : pr.ci == "fail" ? (" ✗", .red) : pr.ci == "pending" ? (" …", .yellow) : pr.ci == "pass" ? (" ✓", .green) : ("", .white.opacity(0.6))
+        let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", p.merged) : pr.state == "CLOSED" ? (" closed", p.stale)
+            : pr.ci == "fail" ? (" ✗", p.failing) : pr.ci == "pending" ? (" …", p.caution) : pr.ci == "pass" ? (" ✓", p.idle) : ("", .white.opacity(0.6))
         let draft = pr.draft == true && pr.state == "OPEN" ? " draft" : ""
         return Text("#\(String(pr.number))\(draft)\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
+            .modifier(Clickable())
             .onTapGesture { if let u = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(u) } }
     }
 
     func row(_ s: Session) -> some View {
-        let (word, color): (String, Color) = s.needs == true ? ("needs you", .pink) : s.status == "busy" ? ("working", .orange)
-            : s.stale == true ? ("stale", .gray) : ("idle", .green)
+        let (word, color): (String, Color) = s.needs == true ? ("needs you", p.needs) : s.status == "busy" ? ("working", p.working)
+            : s.stale == true ? ("stale", p.stale) : ("idle", p.idle)
         // the folder is only worth showing when it differs from the repo header (git worktrees)
         let place = (s.project == s.repo ? "" : " · \(s.project)") + (s.branch.map { " · \($0)" } ?? "")
         return HStack(alignment: .top, spacing: 8) {
-            RoundedRectangle(cornerRadius: 1.5).fill(repoColor(s.repo)).frame(width: 3)
+            RoundedRectangle(cornerRadius: 1.5).fill(p.repo(s.repo).opacity(p.id == "focus" ? 0.35 : 1)).frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Circle().fill(color).frame(width: 6, height: 6)
@@ -309,7 +443,7 @@ struct NotchView: View {
                 }
                 // status in its color, then tool and branch; yellow dot = uncommitted changes
                 HStack(spacing: 5) {
-                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(.yellow))")
+                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(p.caution))")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     if let pr = s.pr { prLabel(pr) }
                 }
@@ -325,9 +459,10 @@ struct NotchView: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(.vertical, 4).padding(.trailing, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.pink.opacity(s.needs == true ? 0.16 : 0)))
+        .background(RoundedRectangle(cornerRadius: 6).fill(p.needs.opacity(s.needs == true ? 0.16 : 0)))
         .opacity(s.stale == true ? 0.5 : 1)
         .contentShape(Rectangle())
+        .modifier(Clickable())
         .onTapGesture { focus(s) }
     }
 }
@@ -407,5 +542,16 @@ struct NotchApp {
         ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 12, reset: "4d")]),
     ]
     save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 250)
+    if CommandLine.arguments.contains("--palettes") { // every palette on one sheet, for comparing
+        let sheet = VStack(spacing: 0) {
+            ForEach(Palette.all) { q in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(q.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white).padding(.leading, 16)
+                    NotchView(store: withLimits, notch: notch, open: true, forcedPalette: q).frame(width: 1000, height: 250)
+                }.padding(.top, 10)
+            }
+        }
+        save(sheet, "palettes.png", height: CGFloat(Palette.all.count) * 284)
+    }
     save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }
