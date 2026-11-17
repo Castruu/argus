@@ -17,6 +17,8 @@ struct Session {
     id: String,
     title: String,
     cwd: String,
+    repo: String,
+    tty: Option<String>,
     status: String,
     idle_secs: u64,
     last_prompt: String,
@@ -56,12 +58,13 @@ fn collect(home: &Path) -> Vec<Session> {
     let mut out = claude_sessions(home);
     out.extend(codex_sessions(home));
     for s in &mut out {
+        s.repo = repo_of(&s.cwd);
         s.summary = fs::read_to_string(home.join(".cache/ccs").join(format!("{}.txt", s.id)))
             .ok()
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
     }
-    out.sort_by_key(|s| s.idle_secs);
+    out.sort_by(|a, b| (&a.repo, a.idle_secs).cmp(&(&b.repo, b.idle_secs)));
     out
 }
 
@@ -105,6 +108,8 @@ fn claude_sessions(home: &Path) -> Vec<Session> {
             id,
             title,
             cwd,
+            repo: String::new(),
+            tty: meta["pid"].as_u64().and_then(tty_of),
             status: meta["status"].as_str().unwrap_or("?").to_string(),
             idle_secs: now().saturating_sub(updated_ms / 1000),
             last_prompt,
@@ -112,6 +117,20 @@ fn claude_sessions(home: &Path) -> Vec<Session> {
         });
     }
     out
+}
+
+/// Main repo name, so git worktrees group under their repo. Falls back to the folder name.
+fn repo_of(cwd: &str) -> String {
+    Command::new("git").args(["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_end_matches("/.git").to_string())
+        .map_or_else(|| project(cwd).to_string(), |root| project(&root).to_string())
+}
+
+fn tty_of(pid: u64) -> Option<String> {
+    let out = Command::new("ps").args(["-o", "tty=", "-p", &pid.to_string()]).output().ok()?;
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!t.is_empty() && t != "??").then(|| format!("/dev/{t}"))
 }
 
 fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
@@ -152,6 +171,8 @@ fn codex_sessions(home: &Path) -> Vec<Session> {
             id,
             title,
             cwd: meta["cwd"].as_str().unwrap_or_default().to_string(),
+            repo: String::new(),
+            tty: None,
             status: if idle < 10 { "busy" } else { "idle" }.to_string(),
             idle_secs: idle,
             last_prompt,
@@ -178,7 +199,7 @@ fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
 fn to_json(sessions: &[Session]) -> String {
     let arr: Vec<Value> = sessions.iter().map(|s| json!({
         "tool": s.tool, "id": s.id, "title": s.title, "cwd": s.cwd,
-        "project": project(&s.cwd), "status": s.status, "idle_secs": s.idle_secs,
+        "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
     })).collect();
     Value::Array(arr).to_string()
@@ -209,13 +230,18 @@ fn print_table(sessions: &[Session]) {
     if sessions.is_empty() {
         println!("no active sessions");
     }
+    let mut repo = "";
     for s in sessions {
+        if s.repo != repo {
+            repo = &s.repo;
+            println!("\x1b[1;36m{repo}\x1b[0m");
+        }
         let dot = if s.status == "busy" { "\x1b[33m●\x1b[0m" } else { "\x1b[32m●\x1b[0m" };
-        println!("{dot} \x1b[1m{}\x1b[0m  \x1b[2m{} · {} · {} {}\x1b[0m",
+        println!("  {dot} \x1b[1m{}\x1b[0m  \x1b[2m{} · {} · {} {}\x1b[0m",
             one_line(&s.title, 60), s.tool, project(&s.cwd), s.status, ago(s.idle_secs));
         let detail = s.summary.as_deref().unwrap_or(&s.last_prompt);
         if !detail.is_empty() {
-            println!("    {}", one_line(detail, 100));
+            println!("      {}", one_line(detail, 100));
         }
     }
 }
@@ -252,6 +278,7 @@ mod tests {
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
-        assert_eq!((x.title.as_str(), x.last_prompt.as_str(), project(&x.cwd)), ("API tests", "add tests", "api"));
+        assert_eq!((x.title.as_str(), x.last_prompt.as_str(), x.repo.as_str()), ("API tests", "add tests", "api"));
+        assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
     }
 }
