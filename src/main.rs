@@ -165,16 +165,18 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
         s.branch = g["branch"].as_str().map(str::to_string);
         s.dirty = g["dirty"] == true;
         s.stale = s.status != "busy" && s.idle_secs > STALE_SECS;
-        // Claude sessions already know their PR (pr-link); gh only adds state and CI, looked up by URL.
-        // Others fall back to the checked-out branch: default branches rarely have a PR, and stale
-        // sessions are not worth a GitHub call.
+        // Claude sessions record their own PR (pr-link); gh only adds state and CI, looked up by URL.
+        // No pr-link means the session has no PR: the folder's branch may have one it never touched.
+        // Codex records nothing, so it falls back to the checked-out branch, but only while that PR
+        // is open: a merged one on the branch you're still on is old news, not this session's work.
+        // Default branches rarely have a PR, and stale sessions are not worth a GitHub call.
         if let Some(url) = s.pr["url"].as_str().map(str::to_string) {
             if !s.stale {
                 let live = pr_state(home, &s.cwd, Some(&url));
                 if !live.is_null() { s.pr = live; }
             }
-        } else if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
-            s.pr = pr_state(home, &s.cwd, None);
+        } else if s.tool != "claude" && !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
+            s.pr = open_only(pr_state(home, &s.cwd, None));
         }
         s.needs = !s.stale && (s.status == "waiting" || (s.status == "idle" && s.asks));
         let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
@@ -295,6 +297,11 @@ fn git_state(cwd: &str) -> (Option<String>, bool) {
     let text = String::from_utf8_lossy(&out.stdout);
     let branch = text.lines().find_map(|l| l.strip_prefix("# branch.head ")).map(str::to_string);
     (branch, text.lines().any(|l| !l.starts_with('#')))
+}
+
+/// The PR if it is still open, else null.
+fn open_only(pr: Value) -> Value {
+    if pr["state"] == "OPEN" { pr } else { Value::Null }
 }
 
 /// Cached PR for `url` if given, else for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
@@ -597,6 +604,8 @@ mod tests {
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS", "conclusion": ""}, {"state": "SUCCESS"}])), Some("pending"));
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "conclusion": "FAILURE"}])), Some("fail"));
         assert_eq!(ci_of(&json!([])), None);
+        assert_eq!(open_only(json!({"number": 1, "state": "OPEN"}))["number"], 1);
+        assert!(open_only(json!({"number": 2, "state": "MERGED"})).is_null(), "a merged branch PR is not shown");
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
