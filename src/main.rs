@@ -395,7 +395,27 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Se
         let (mut meta, mut last_prompt) = (None::<Value>, String::new());
         // Match tokens, not key/value spacing; parsed fields below decide which lines count.
         let mut turn_cwd = None::<String>;
-        for l in read_jsonl(path, |l| l.contains("\"session_meta\"") || l.contains("\"user\"") || l.contains("\"turn_context\"")) {
+        let mut status = "idle";
+        let mut active_turn = None::<String>;
+        for l in read_jsonl(path, |l| {
+            l.contains("\"session_meta\"") || l.contains("\"user\"") || l.contains("\"turn_context\"")
+                || l.contains("\"task_started\"") || l.contains("\"task_complete\"") || l.contains("\"turn_aborted\"")
+        }) {
+            if l["type"] == "event_msg" {
+                let payload = &l["payload"];
+                match payload["type"].as_str() {
+                    Some("task_started") => {
+                        status = "busy";
+                        active_turn = payload["turn_id"].as_str().map(String::from);
+                    }
+                    Some("task_complete" | "turn_aborted")
+                        if active_turn.is_none() || payload["turn_id"].as_str() == active_turn.as_deref() => {
+                        status = "idle";
+                        active_turn = None;
+                    }
+                    _ => {}
+                }
+            }
             if meta.is_none() && l["type"] == "session_meta" {
                 meta = Some(l["payload"].clone());
             }
@@ -427,7 +447,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Se
             cwd: turn_cwd.or_else(|| meta["cwd"].as_str().map(String::from)).unwrap_or_default(),
             repo: String::new(),
             tty,
-            status: if idle < 10 { "busy" } else { "idle" }.to_string(),
+            status: status.to_string(),
             idle_secs: idle,
             last_prompt,
             summary: None,
@@ -558,6 +578,37 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].last_prompt, "spaced codex prompt");
         assert_eq!(sessions[0].title, "Newest title");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_status_follows_turn_events_not_file_activity() {
+        let home = env::temp_dir().join(format!("ccs-lifecycle-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("rollout.jsonl");
+        let open = [(path.clone(), 0)];
+        let append = |event: Value| {
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{event}").unwrap();
+        };
+        let status = || codex_sessions(&home, &open, &Procs::new()).remove(0).status;
+        fs::write(&path, concat!(
+            r#"{"type":"session_meta","payload":{"id":"cx","source":"cli"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#, "\n",
+        )).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(now() - 120);
+        fs::File::options().write(true).open(&path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        assert_eq!(status(), "busy", "a silent running turn must not trigger completion");
+        append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
+        assert_eq!(status(), "idle");
+        append(json!({"type":"event_msg","payload":{"type":"token_count"}}));
+        assert_eq!(status(), "idle", "post-completion writes must not restart the turn");
+        append(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}));
+        assert_eq!(status(), "busy");
+        append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
+        assert_eq!(status(), "busy", "an earlier turn cannot end the active turn");
+        append(json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"two"}}));
+        assert_eq!(status(), "idle");
         fs::remove_dir_all(home).unwrap();
     }
 
