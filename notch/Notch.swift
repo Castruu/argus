@@ -281,14 +281,13 @@ struct NotchView: View {
         VStack(alignment: .leading, spacing: 10) {
             if open {
                 Spacer().frame(height: notch.height - 6)
-                // header: counts by state (doubles as the color legend) on the left, usage on the right
+                // Counts by state double as the color legend; keep the header compact.
                 HStack(spacing: 14) {
                     count("working", p.working) { $0.status == "busy" }
                     count("need you", p.needs) { $0.needs == true }
                     count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
                     count("stale", p.stale) { $0.stale == true }
                     Spacer(minLength: 24)
-                    if !store.limits.isEmpty { limitsRow }
                     paletteMenu
                     soundToggle
                 }.font(.system(size: 11, weight: .semibold))
@@ -354,25 +353,6 @@ struct NotchView: View {
         .onHover { h in store.open = h; withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
-    }
-
-    /// Usage bars, e.g. "Claude 5h ▬▬▭ 84% ↻3h", each colored by its own usage.
-    var limitsRow: some View {
-        HStack(spacing: 16) {
-            ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
-                let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
-                HStack(spacing: 6) {
-                    Text(label)
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.white.opacity(0.15))
-                        Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
-                    }.frame(width: 44, height: 4)
-                    Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(c)
-            }
-        }
     }
 
     /// Header icon: click for the next palette, right-click to pick one. Remembered across launches.

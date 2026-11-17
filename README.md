@@ -26,7 +26,7 @@ web-app
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
 - `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). With the default Cool palette, a bar turns violet at 80% and coral at 95%.
-- `notch`: macOS overlay; hover the notch to see sessions. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
+- `notch`: macOS overlay; hover the notch to see sessions. Usage bars stay in `ccs --limits` to keep the panel compact; the collapsed pill in `--beside-notch` mode still warns about high usage. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
 
@@ -63,6 +63,13 @@ To check notification sounds and muting without playing audio:
 ```sh
 swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/NotificationSoundTests.swift -o /tmp/ccs-notification-tests
 /tmp/ccs-notification-tests
+```
+
+To check that usage data does not widen the session panel:
+
+```sh
+swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/NotchLayoutTests.swift -o /tmp/ccs-layout-tests
+/tmp/ccs-layout-tests
 ```
 
 ## Enable summaries
