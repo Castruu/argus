@@ -90,6 +90,7 @@ struct NotchView: View {
     @ObservedObject var store: Store
     let notch: CGSize
     @State var open = false
+    @State private var columnsHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -109,14 +110,17 @@ struct NotchView: View {
                         .frame(width: 250, alignment: .topLeading)
                     }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnsHeight = $0 }
                 if !store.limits.isEmpty {
                     Text(store.limits).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                 }
-                ViewThatFits(in: .vertical) {
+                // Hug the content; only scroll once it outgrows the cap (a flexible frame here made the panel always 520pt tall).
+                let maxHeight = 520 - notch.height
+                if columnsHeight > maxHeight {
+                    ScrollView(.vertical) { columns }.frame(height: maxHeight)
+                } else {
                     columns
-                    ScrollView(.vertical) { columns }.frame(height: 520 - notch.height)
                 }
-                .frame(maxHeight: 520 - notch.height)
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
                 HStack(spacing: 6) {
