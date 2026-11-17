@@ -42,9 +42,9 @@ type Procs = HashMap<u64, Option<String>>;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if let [_, flag, cwd, out] = args.as_slice() {
+    if let [_, flag, cwd, out, url @ ..] = args.as_slice() {
         if flag == "--fetch-pr" {
-            return fetch_pr(cwd, Path::new(out));
+            return fetch_pr(cwd, Path::new(out), url.first().map(String::as_str));
         }
     }
     let as_json = args.iter().any(|a| a == "--json");
@@ -123,6 +123,10 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         if let Some(t) = l["customTitle"].as_str() {
             entry["custom_title"] = t.into(); // set by /rename; wins over the generated title
         }
+        if l["type"] == "pr-link" {
+            // Claude Code records the PR a session works on; no GitHub call needed for number and link
+            entry["pr_link"] = json!({"number": l["prNumber"], "url": l["prUrl"]});
+        }
         if l["type"] == "user" {
             if let Some(t) = l["message"]["content"].as_str().filter(|t| !t.starts_with('<')) {
                 entry["last_prompt"] = t.chars().take(300).collect::<String>().into();
@@ -140,8 +144,8 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &Value| v["t"].is_object() && v["git"].is_object())
-        .unwrap_or_else(|| json!({"t": {}, "git": {}}));
+        .filter(|v: &Value| v["v"] == 2 && v["t"].is_object() && v["git"].is_object()) // v2: transcripts also yield pr-link
+        .unwrap_or_else(|| json!({"v": 2, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
     out.extend(codex_sessions(home, codex_open));
@@ -155,9 +159,16 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
         s.branch = g["branch"].as_str().map(str::to_string);
         s.dirty = g["dirty"] == true;
         s.stale = s.status != "busy" && s.idle_secs > STALE_SECS;
-        // default branches rarely have a PR and stale sessions are not worth a GitHub call
-        if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
-            s.pr = pr_state(home, &s.cwd);
+        // Claude sessions already know their PR (pr-link); gh only adds state and CI, looked up by URL.
+        // Others fall back to the checked-out branch: default branches rarely have a PR, and stale
+        // sessions are not worth a GitHub call.
+        if let Some(url) = s.pr["url"].as_str().map(str::to_string) {
+            if !s.stale {
+                let live = pr_state(home, &s.cwd, Some(&url));
+                if !live.is_null() { s.pr = live; }
+            }
+        } else if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
+            s.pr = pr_state(home, &s.cwd, None);
         }
         s.needs = !s.stale && (s.status == "waiting" || (s.status == "idle" && s.asks));
         let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
@@ -229,6 +240,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         let title = entry["custom_title"].as_str().or(entry["title"].as_str()).or(meta["name"].as_str()).unwrap_or("?").to_string();
         let last_prompt = entry["last_prompt"].as_str().unwrap_or("").to_string();
         let asks = entry["asks"] == true;
+        let pr = entry["pr_link"].clone();
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
         out.push(Session {
             tool: "claude",
@@ -247,7 +259,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             stale: false,
             branch: None,
             dirty: false,
-            pr: Value::Null,
+            pr,
         });
     }
     out
@@ -280,10 +292,11 @@ fn git_state(cwd: &str) -> (Option<String>, bool) {
     (branch, text.lines().any(|l| !l.starts_with('#')))
 }
 
-/// Cached PR for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
+/// Cached PR for `url` if given, else for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
 /// PR_TTL this starts `ccs --fetch-pr` in the background and returns what it has; the next run sees the result.
-fn pr_state(home: &Path, cwd: &str) -> Value {
-    let path = home.join(".cache/ccs").join(format!("pr{}.json", cwd.replace('/', "-")));
+fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
+    let key = url.unwrap_or(cwd).replace(['/', ':'], "-");
+    let path = home.join(".cache/ccs").join(format!("pr{key}.json"));
     let age = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
     if age.is_none_or(|a| a.as_secs() > PR_TTL) {
         // mark the attempt first, so a slow or failing lookup is not started again on the next refresh
@@ -293,19 +306,19 @@ fn pr_state(home: &Path, cwd: &str) -> Value {
             fs::create_dir_all(home.join(".cache/ccs")).and_then(|_| fs::write(&path, "null"))
         };
         if let (Ok(()), Ok(exe)) = (marked, env::current_exe()) {
-            Command::new(exe).arg("--fetch-pr").arg(cwd).arg(&path)
+            Command::new(exe).arg("--fetch-pr").arg(cwd).arg(&path).args(url)
                 .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok();
         }
     }
     fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null)
 }
 
-/// `ccs --fetch-pr <cwd> <out>`: asks `gh` for the current branch's PR and writes it (or null) to <out>.
-fn fetch_pr(cwd: &str, out: &Path) {
+/// `ccs --fetch-pr <cwd> <out> [url]`: asks `gh` for that PR (or the current branch's) and writes it (or null) to <out>.
+fn fetch_pr(cwd: &str, out: &Path, url: Option<&str>) {
     // launchd starts the overlay without Homebrew on PATH
     let pr = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"].iter()
         .find_map(|gh| Command::new(gh).current_dir(cwd)
-            .args(["pr", "view", "--json", "number,state,isDraft,url,statusCheckRollup"]).output().ok())
+            .args(["pr", "view"]).args(url).args(["--json", "number,state,isDraft,url,statusCheckRollup"]).output().ok())
         .filter(|o| o.status.success())
         .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
         .map_or(Value::Null, |v| json!({
@@ -485,6 +498,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"first ask"}}"#, "\n",
             r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#, "\n",
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done.\n\n**Ship it?**"}]}}"#, "\n",
+            r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r"}"#, "\n",
             r#"{"type":"ai-title","aiTitle":"Fix login"}"#, "\n"));
         w(".claude/sessions/4.json", &format!(r#"{{"pid":{me},"sessionId":"fresh","cwd":"/x/proj","status":"waiting","waitingFor":"permission","updatedAt":{}}}"#, now() * 1000));
 
@@ -511,6 +525,8 @@ mod tests {
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
         assert!(c.asks && c.stale && !c.needs, "an old question is stale, not needs-you");
+        assert_eq!((c.pr["number"].as_u64(), c.pr["url"].as_str()), (Some(7), Some("https://github.com/o/r/pull/7")),
+            "Claude's pr-link gives the PR without asking GitHub (stale, so no gh lookup)");
         let f = s.iter().find(|s| s.id == "fresh").unwrap();
         assert!(f.needs, "waiting status needs the user");
         assert_eq!(f.summary.as_deref(), Some("Tests pass"), "verdict prefix is stripped");
