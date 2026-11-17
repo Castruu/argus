@@ -25,8 +25,7 @@ struct Session {
     idle_secs: u64,
     last_prompt: String,
     summary: Option<String>,
-    waiting_for: Option<String>, // set by Claude Code while blocked on a permission prompt or question
-    asks: bool,                  // last assistant message ends with a question
+    waiting_for: Option<String>, // Claude Code's reason for waiting, including ordinary dialogs
     needs: bool,                 // waiting on the user
     stale: bool,                 // idle for over a day
     branch: Option<String>,
@@ -178,10 +177,6 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
             if let Some(t) = l["message"]["content"].as_str().filter(|t| !t.starts_with('<')) {
                 entry["last_prompt"] = t.chars().take(300).collect::<String>().into();
             }
-        } else if l["type"] == "assistant" {
-            if let Some(t) = l["message"]["content"].as_array().and_then(|a| a.iter().rev().find_map(|c| c["text"].as_str())) {
-                entry["asks"] = ends_with_question(t).into();
-            }
         }
     }
     entry["len"] = from.into();
@@ -217,22 +212,18 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
         } else if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
             s.pr = pr_state(home, &s.cwd, None);
         }
-        s.needs = !s.stale && (s.status == "waiting" || (s.status == "idle" && s.asks));
+        // shortcut: ambiguous dialogs stay quiet, add explicit request reasons when Claude exposes them.
+        s.needs = !s.stale && s.status == "waiting" && matches!(s.waiting_for.as_deref(),
+            Some("permission" | "permission prompt" | "input needed" | "sandbox request" | "worker request" | "goal proposal"));
         let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
         s.summary = fs::read_to_string(&path)
             .ok()
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
-        // The summary hook prefixes its verdict ("WAIT: " / "DONE: "). Trust it over the question-mark
-        // heuristic, but only if it was written after the session's last status change.
-        let fresh = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() <= s.idle_secs + 5);
+        // Strip verdicts from older summaries for display; summaries never determine attention.
         if let Some(t) = s.summary.take() {
             s.summary = Some(match t.split_once(": ") {
-                Some((v @ ("WAIT" | "DONE"), rest)) => {
-                    if fresh { s.asks = v == "WAIT"; }
-                    rest.to_string()
-                }
+                Some(("WAIT" | "DONE", rest)) => rest.to_string(),
                 _ => t,
             });
         }
@@ -285,7 +276,6 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         }
         let title = entry["custom_title"].as_str().or(entry["title"].as_str()).or(meta["name"].as_str()).unwrap_or("?").to_string();
         let last_prompt = entry["last_prompt"].as_str().unwrap_or("").to_string();
-        let asks = entry["asks"] == true;
         let pr = entry["pr_link"].clone();
         // the registry keeps the folder the session started in; the transcript knows where it is now
         let cwd = entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string();
@@ -303,7 +293,6 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             last_prompt,
             summary: None,
             waiting_for: meta["waitingFor"].as_str().map(str::to_string),
-            asks,
             needs: false,
             stale: false,
             branch: None,
@@ -320,12 +309,6 @@ fn repo_of(cwd: &str) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_end_matches("/.git").to_string())
         .map_or_else(|| project(cwd).to_string(), |root| project(&root).to_string())
-}
-
-/// True when the last non-empty line ends with a question mark (ignoring closing markdown/quotes).
-fn ends_with_question(text: &str) -> bool {
-    text.lines().rev().find(|l| !l.trim().is_empty())
-        .is_some_and(|l| l.trim().trim_end_matches(['*', '_', ')', '"', '`']).ends_with('?'))
 }
 
 /// Branch name and whether the tree has uncommitted changes.
@@ -463,7 +446,6 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
             last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
             summary: None,
             waiting_for: None,
-            asks: false,
             needs: false,
             stale: false,
             branch: None,
@@ -565,7 +547,6 @@ mod tests {
         assert_eq!(entry["last_prompt"], "spaced prompt");
         assert_eq!(entry["custom_title"], "My title");
         assert_eq!(entry["title"], "Later AI title");
-        assert_eq!(entry["asks"], true);
         assert_eq!(entry["pr_link"]["number"], 7);
         assert_eq!(entry["len"], body.rfind('\n').unwrap() + 1);
         fs::OpenOptions::new().append(true).open(&claude).unwrap().write_all(b" prompt\"}}\n").unwrap();
@@ -617,6 +598,53 @@ mod tests {
     }
 
     #[test]
+    fn claude_needs_only_explicit_pending_requests() {
+        let home = env::temp_dir().join(format!("ccs-needs-{}", std::process::id()));
+        let registry = home.join(".claude/sessions/1.json");
+        let transcript = home.join(".claude/projects/test/pending.jsonl");
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        fs::write(&transcript, concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Ship it?"}]}}"#, "\n",
+            r#"{"type":"user","message":{"content":"<command-name>/usage</command-name>"}}"#, "\n",
+        )).unwrap();
+        let procs = Procs::from([(1, (None, 0, String::new()))]);
+        let cases = [
+            ("waiting", Some("permission"), false, true),
+            ("waiting", Some("permission prompt"), false, true),
+            ("waiting", Some("input needed"), false, true),
+            ("waiting", Some("sandbox request"), false, true),
+            ("waiting", Some("worker request"), false, true),
+            ("waiting", Some("goal proposal"), false, true),
+            ("waiting", Some("dialog open"), false, false),
+            ("waiting", Some("unknown"), false, false),
+            ("waiting", None, false, false),
+            ("idle", None, false, false),
+            ("idle", Some("input needed"), false, false),
+            ("busy", Some("permission prompt"), false, false),
+            ("waiting", Some("permission prompt"), true, false),
+        ];
+        for (status, reason, stale, needs) in cases {
+            fs::write(&registry, json!({
+                "pid": 1, "sessionId": "pending", "cwd": home, "status": status,
+                "waitingFor": reason, "statusUpdatedAt": if stale { 0 } else { now() * 1000 },
+            }).to_string()).unwrap();
+            fs::write(home.join(".cache/ccs/pending.txt"),
+                if needs { "DONE: Old summary" } else { "WAIT: Old question" }).unwrap();
+            let sessions = collect(&home, &[], &procs);
+            assert_eq!(sessions[0].needs, needs, "{status}, {reason:?}, stale={stale}");
+            assert_eq!(sessions[0].summary.as_deref(), Some(if needs { "Old summary" } else { "Old question" }));
+            // A cached question flag from an older build must never restore the heuristic.
+            let path = home.join(".cache/ccs/cache.json");
+            let mut cache: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            cache["t"]["pending"]["asks"] = true.into();
+            fs::write(path, cache.to_string()).unwrap();
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn reads_claude_and_codex_fixtures() {
         let home = env::temp_dir().join(format!("ccs-test-{}", std::process::id()));
         let w = |p: &str, c: &str| {
@@ -661,7 +689,7 @@ mod tests {
         fs::write(&t, fs::read_to_string(&t).unwrap() + r#"{"type":"ai-title","aiTitle":"Fix login v2"}"# + "\n").unwrap();
         let again = collect(&home, &open, &procs);
         let a = again.iter().find(|s| s.id == "abc").unwrap();
-        assert_eq!((a.title.as_str(), a.last_prompt.as_str(), a.asks), ("Fix login v2", "first ask", true));
+        assert_eq!((a.title.as_str(), a.last_prompt.as_str()), ("Fix login v2", "first ask"));
         let cache: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/cache.json")).unwrap()).unwrap();
         let codex_path = rollouts.join("rollout-1.jsonl");
         assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
@@ -669,11 +697,11 @@ mod tests {
         fs::remove_dir_all(&home).ok();
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
-        assert!(c.asks && c.stale && !c.needs, "an old question is stale, not needs-you");
+        assert!(c.stale && !c.needs, "an old question is stale, not needs-you");
         assert_eq!((c.pr["number"].as_u64(), c.pr["url"].as_str()), (Some(7), Some("https://github.com/o/r/pull/7")),
             "Claude's pr-link gives the PR without asking GitHub (stale, so no gh lookup)");
         let f = s.iter().find(|s| s.id == "fresh").unwrap();
-        assert!(f.needs, "waiting status needs the user");
+        assert!(f.needs, "an explicit permission request needs the user");
         assert_eq!(f.summary.as_deref(), Some("Tests pass"), "verdict prefix is stripped");
         let pos = |id: &str| s.iter().position(|s| s.id == id).unwrap();
         assert!(pos("fresh") < pos("abc"), "needs-you sorts first within a repo");

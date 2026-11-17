@@ -228,7 +228,7 @@ final class Store: ObservableObject {
         guard !first else { return } // no chimes for what was already there at launch
         // "needs you" (Glass) wins over "finished" (Tink)
         let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
-        guard let done = asking ?? new.first(where: { wasBusy.contains($0.id) && $0.status != "busy" }) else { return }
+        guard let done = asking ?? new.first(where: { wasBusy.contains($0.id) && $0.status == "idle" }) else { return }
         NSSound(named: asking != nil ? "Glass" : "Tink")?.play()
         withAnimation(.spring(duration: 0.3)) { finished = done }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
