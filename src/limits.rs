@@ -121,9 +121,9 @@ fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Res
 
 fn save_usage(home: &Path, tool: &str, usage: Value) -> std::io::Result<()> {
     let path = home.join(format!(".cache/ccs/{tool}-limits.json"));
-    fs::create_dir_all(path.parent().unwrap())?;
+    crate::cache::prepare(home)?;
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp, usage.to_string())?;
+    crate::cache::write_new(&tmp, &usage.to_string())?;
     let result = fs::rename(&tmp, &path);
     if result.is_err() { let _ = fs::remove_file(tmp); }
     result

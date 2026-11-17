@@ -101,9 +101,13 @@ sys.exit(1 if os.getenv('FAIL') else 0)
             {"type": "user", "message": {"content": "Fix login"}},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "Tests pass"}]}},
         ])
+        self.cache.mkdir(parents=True)
+        self.cache.chmod(0o755)
         self.invoke(provider=None)
         self.wait_for(self.output.exists)
         call = json.loads(self.calls.read_text())
+        self.assertEqual(self.cache.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.output.stat().st_mode & 0o777, 0o600)
         self.assertEqual(Path(call["cwd"]).resolve(), self.cache.resolve())
         args = call["args"]
         self.assertIn("haiku", args)

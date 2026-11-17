@@ -12,7 +12,8 @@ case "$id" in ""|*[!a-zA-Z0-9_-]*) exit 0 ;; esac
 
 dir="$HOME/.cache/ccs"
 out="$dir/$id.txt"
-mkdir -p "$dir"
+umask 077
+[ ! -L "$dir" ] && mkdir -p "$dir" && chmod 700 "$dir" || exit 0
 # throttle: at most one summary per session every 3 minutes
 # throttle on a separate stamp so the summary's mtime is the time it was really written
 stamp="$dir/$id.stamp"

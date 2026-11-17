@@ -162,7 +162,7 @@ final class Store: ObservableObject {
         // File events drive updates: Claude rewrites a session file when its status changes, and the hooks
         // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"].filter { FileManager.default.fileExists(atPath: $0) }
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in

@@ -4,6 +4,8 @@ See your active Claude Code and Codex sessions at a glance.
 
 Hover the MacBook notch to see every session, grouped by repo. Click one to bring it forward in the app it runs in.
 
+Session data is read locally. Opening the notch checks usage with Anthropic and OpenAI, PR status uses GitHub, and optional AI summaries send recent conversation text through your installed Claude or Codex CLI. Prompt excerpts and summaries are cached under `~/.cache/ccs`, accessible only to your account.
+
 Each session's Claude or Codex icon is tinted by its status, with the state written below it. Hover the icon to see the provider name.
 
 Hover a session's summary or last prompt to read the full text in a tooltip.

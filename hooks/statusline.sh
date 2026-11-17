@@ -3,7 +3,8 @@
 # for ccs/notch, and prints a short usage line.
 input=$(cat)
 dir="$HOME/.cache/ccs"
-mkdir -p "$dir"
+umask 077
+[ ! -L "$dir" ] && mkdir -p "$dir" && chmod 700 "$dir" || exit 0
 [ -n "$CCS_STATUSLINE_DEBUG" ] && printf '%s' "$input" > "$dir/statusline-debug.json"
 tmp="$dir/claude-limits.$$.tmp"
 printf '%s' "$input" | jq -c '.rate_limits // empty' > "$tmp" 2>/dev/null

@@ -1,5 +1,6 @@
 //! ccs: list active Claude Code and Codex sessions.
 //! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh]
+mod cache;
 mod limits;
 mod pr;
 
@@ -42,6 +43,10 @@ const PR_TTL: u64 = 300; // seconds between GitHub lookups per folder
 type Procs = HashMap<u64, (Option<String>, u64, String)>;
 
 fn main() {
+    if let Err(error) = cache::prepare(&home()) {
+        eprintln!("Could not secure the session cache: {error}");
+        std::process::exit(1);
+    }
     let args: Vec<String> = env::args().collect();
     if let [_, flag, cwd, out, url @ ..] = args.as_slice() {
         if flag == "--fetch-pr" {
@@ -256,8 +261,7 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     cache["git"].as_object_mut().unwrap().retain(|k, _| out.iter().any(|s| &s.cwd == k));
     if cache != old {
         let tmp = cache_path.with_extension(format!("{}.tmp", std::process::id()));
-        fs::create_dir_all(home.join(".cache/ccs")).ok();
-        if fs::write(&tmp, cache.to_string()).is_ok() {
+        if cache::prepare(home).and_then(|_| cache::write_new(&tmp, &cache.to_string())).is_ok() {
             fs::rename(&tmp, &cache_path).ok();
         }
     }
@@ -364,7 +368,7 @@ fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
         let marked = if path.exists() {
             fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(SystemTime::now()))
         } else {
-            fs::create_dir_all(home.join(".cache/ccs")).and_then(|_| fs::write(&path, "null"))
+            cache::prepare(home).and_then(|_| cache::write_new(&path, "null"))
         };
         if let (Ok(()), Ok(exe)) = (marked, env::current_exe()) {
             Command::new(exe).arg("--fetch-pr").arg(cwd).arg(&path).args(url)
@@ -390,7 +394,7 @@ fn fetch_pr(cwd: &str, out: &Path, url: Option<&str>) {
             "ci": ci_of(&v["statusCheckRollup"]),
         }));
     let tmp = out.with_extension(format!("{}.tmp", std::process::id()));
-    if fs::write(&tmp, pr.to_string()).is_ok() {
+    if cache::write_new(&tmp, &pr.to_string()).is_ok() {
         fs::rename(&tmp, out).ok();
     }
 }
