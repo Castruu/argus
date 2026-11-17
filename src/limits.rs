@@ -1,8 +1,12 @@
 //! Usage limits for the signed-in Claude and Codex accounts, read from what each tool already
 //! caches on disk: no tokens, no network. Numbers are as fresh as the tool's last request.
-use crate::{now, read_jsonl};
+use crate::now;
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 pub struct Window {
     pub label: String,
@@ -36,8 +40,7 @@ fn codex(home: &Path) -> Vec<Window> {
         .flat_map(|y| newest_first(&y)).flat_map(|m| newest_first(&m)).flat_map(|d| newest_first(&d))
         .take(20); // bounded: don't read every old session if none has limits
     for f in files {
-        let lines = read_jsonl(&f);
-        let Some(rl) = lines.iter().rev().map(|l| &l["payload"]["rate_limits"]).find(|r| r.is_object()) else { continue };
+        let Some(rl) = last_rate_limits(&f) else { continue };
         return ["primary", "secondary"].iter()
             .filter_map(|k| {
                 let w = &rl[*k];
@@ -46,6 +49,36 @@ fn codex(home: &Path) -> Vec<Window> {
             .collect();
     }
     vec![]
+}
+
+/// Tail read starts at 256 KB and grows 4x until it finds limits or hits this cap.
+const TAIL_START: u64 = 256 * 1024;
+const TAIL_MAX: u64 = 16 * 1024 * 1024;
+
+/// The newest `rate_limits` in a rollout. Codex appends them on every turn, so they sit near the
+/// end; rollouts grow to hundreds of MB, so read only the tail instead of the whole file.
+fn last_rate_limits(path: &Path) -> Option<Value> {
+    let mut f = File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut size = TAIL_START;
+    loop {
+        let start = len.saturating_sub(size);
+        let mut buf = Vec::new();
+        f.seek(SeekFrom::Start(start)).ok()?;
+        f.by_ref().take(len - start).read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        // mid-file the first line is cut off; a half-written last line just fails to parse
+        let body = if start == 0 { &text[..] } else { text.split_once('\n').map_or("", |(_, rest)| rest) };
+        let found = body.lines().rev()
+            .filter(|l| l.contains("\"rate_limits\""))
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|mut l| l["payload"]["rate_limits"].take())
+            .find(|r| r.is_object());
+        if found.is_some() || start == 0 || size >= TAIL_MAX {
+            return found;
+        }
+        size *= 4;
+    }
 }
 
 /// A window whose reset time has passed is back to 0%, even if the cache hasn't caught up.
@@ -151,5 +184,23 @@ mod tests {
         assert_eq!(to_json(&l)[0]["windows"][1]["used"], 93.0);
         assert_eq!(to_json(&l)[1]["windows"][0]["reset"], "1h");
         assert_eq!(until(now() + 34 * 3600 + 60), "1d 10h");
+    }
+
+    #[test]
+    fn finds_limits_far_from_the_end_without_reading_whole_file() {
+        let dir = std::env::temp_dir().join(format!("ccs-tail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("rollout.jsonl");
+        let limits = |p: f64| json!({"payload": {"rate_limits": {"primary": {"used_percent": p}}}}).to_string();
+        let filler = format!("{}\n", json!({"payload": {"type": "message", "text": "x".repeat(1000)}}));
+        // older limits, newer limits, then ~1 MB of turns: beyond the first 256 KB window
+        let body = format!("{}\n{}\n{}", limits(5.0), limits(42.0), filler.repeat(1000));
+        fs::write(&f, body).unwrap();
+        let rl = last_rate_limits(&f);
+        fs::write(&f, "{\"type\":\"session_meta\"}\n").unwrap();
+        let none = last_rate_limits(&f);
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(rl.unwrap()["primary"]["used_percent"], 42.0, "newest limits win, found past the first window");
+        assert!(none.is_none());
     }
 }
