@@ -1,0 +1,109 @@
+// Notch overlay: hover the notch to see active Claude Code / Codex sessions (data from `ccs --json`).
+import AppKit
+import SwiftUI
+
+struct Session: Decodable, Identifiable {
+    let tool, id, title, project, status, last_prompt: String
+    let idle_secs: Int
+    let summary: String?
+}
+
+final class Store: ObservableObject {
+    @Published var sessions: [Session] = []
+    let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
+        ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("ccs").path
+
+    init() {
+        refresh()
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+
+    func refresh() {
+        let ccs = self.ccs
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: ccs)
+            p.arguments = ["--json"]
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            guard (try? p.run()) != nil else { return }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            guard let s = try? JSONDecoder().decode([Session].self, from: data) else { return }
+            DispatchQueue.main.async { self.sessions = s }
+        }
+    }
+}
+
+func ago(_ s: Int) -> String { s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m" : "\(s / 3600)h" }
+
+struct NotchView: View {
+    @ObservedObject var store: Store
+    let notch: CGSize
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if open {
+                Spacer().frame(height: notch.height - 6)
+                if store.sessions.isEmpty {
+                    Text("No active sessions").foregroundStyle(.secondary)
+                }
+                ForEach(store.sessions) { s in
+                    HStack(alignment: .top, spacing: 8) {
+                        Circle().fill(s.status == "busy" ? .orange : .green).frame(width: 7, height: 7).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                            Text("\(s.tool) · \(s.project) · \(s.status) \(ago(s.idle_secs))")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text(s.summary ?? s.last_prompt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
+                        }
+                    }
+                }
+            } else {
+                // collapsed: one dot per busy session, sitting under the notch
+                HStack(spacing: 3) {
+                    ForEach(store.sessions.filter { $0.status == "busy" }) { _ in
+                        Circle().fill(.orange).frame(width: 4, height: 4)
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 3)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, open ? 18 : 0)
+        .padding(.bottom, open ? 14 : 0)
+        .frame(width: open ? 440 : notch.width, height: open ? nil : notch.height, alignment: .topLeading)
+        .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10).fill(.black))
+        .contentShape(Rectangle())
+        .onHover { h in withAnimation(.spring(duration: 0.25)) { open = h } }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+@main
+struct NotchApp {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let screen = NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main!
+        let notch: CGSize
+        if let l = screen.auxiliaryTopLeftArea, let r = screen.auxiliaryTopRightArea {
+            notch = CGSize(width: screen.frame.width - l.width - r.width, height: screen.safeAreaInsets.top)
+        } else {
+            notch = CGSize(width: 200, height: 24) // no notch: fake one at the top center
+        }
+        let size = CGSize(width: 480, height: 600)
+        let panel = NSPanel(
+            contentRect: NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height,
+                                width: size.width, height: size.height),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 3)
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.contentView = NSHostingView(rootView: NotchView(store: Store(), notch: notch))
+        panel.orderFrontRegardless()
+        app.run()
+    }
+}
