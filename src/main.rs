@@ -1,5 +1,7 @@
 //! ccs: list active Claude Code and Codex sessions.
-//! Usage: ccs [--json] [--watch]
+//! Usage: ccs [--json] [--watch] | ccs --limits [--json]
+mod limits;
+
 use serde_json::{json, Value};
 use std::{
     env, fs,
@@ -26,6 +28,11 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
+    if args.iter().any(|a| a == "--limits") {
+        let l = limits::read(&home());
+        println!("{}", if as_json { limits::to_json(&l).to_string() } else { limits::line(&l) });
+        return;
+    }
     loop {
         let sessions = collect(&home(), &open_codex_rollouts());
         if as_json {

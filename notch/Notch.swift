@@ -27,8 +27,7 @@ func focus(_ s: Session) {
 
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
-    @Published var limits: String = ""
-    var limitsAt = Date.distantPast
+    @Published var limits = Limits(text: "", max_used: 0)
     @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
@@ -43,21 +42,12 @@ final class Store: ObservableObject {
     func refresh() {
         let ccs = self.ccs
         DispatchQueue.global().async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: ccs)
-            p.arguments = ["--json"]
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            guard (try? p.run()) != nil else { return }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            if Date().timeIntervalSince(self.limitsAt) > 60 {
-                self.limitsAt = Date()
-                let l = readLimits()
-                DispatchQueue.main.async { self.limits = l }
+            let sessions = try? JSONDecoder().decode([Session].self, from: run(ccs, ["--json"]))
+            let limits = try? JSONDecoder().decode(Limits.self, from: run(ccs, ["--limits", "--json"]))
+            DispatchQueue.main.async {
+                if let limits { self.limits = limits }
+                if let sessions { self.update(sessions) }
             }
-            guard let s = try? JSONDecoder().decode([Session].self, from: data) else { return }
-            DispatchQueue.main.async { self.update(s) }
         }
     }
 
@@ -73,15 +63,23 @@ final class Store: ObservableObject {
     }
 }
 
-/// One line of Claude and Codex limits from hooks/limits.sh (next to this repo's build/ folder).
-func readLimits() -> String {
+/// `ccs --limits --json`: one display line plus the tightest window's % used, for coloring.
+struct Limits: Decodable {
+    let text: String
+    let max_used: Double
+    var color: Color { max_used >= 95 ? .red : max_used >= 80 ? .orange : .secondary }
+}
+
+func run(_ bin: String, _ args: [String]) -> Data {
     let p = Process()
-    p.executableURL = binDir.deletingLastPathComponent().appendingPathComponent("hooks/limits.sh")
+    p.executableURL = URL(fileURLWithPath: bin)
+    p.arguments = args
     let pipe = Pipe()
     p.standardOutput = pipe
-    guard (try? p.run()) != nil else { return "" }
-    let out = pipe.fileHandleForReading.readDataToEndOfFile()
-    return String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard (try? p.run()) != nil else { return Data() }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return data
 }
 
 func ago(_ s: Int) -> String { s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m" : "\(s / 3600)h" }
@@ -111,8 +109,8 @@ struct NotchView: View {
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnsHeight = $0 }
-                if !store.limits.isEmpty {
-                    Text(store.limits).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                if !store.limits.text.isEmpty {
+                    Text(store.limits.text).font(.system(size: 10, weight: .medium)).foregroundStyle(store.limits.color)
                 }
                 // Hug the content; only scroll once it outgrows the cap (a flexible frame here made the panel always 520pt tall).
                 let maxHeight = 520 - notch.height
@@ -236,6 +234,8 @@ struct NotchApp {
               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return print("render failed: \(name)") }
         try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
-    save(NotchView(store: Store(sample: sample), notch: notch, open: true), "notch-open.png", height: 215)
+    let withLimits = Store(sample: sample)
+    withLimits.limits = Limits(text: "Claude 5h 16% ↻3h · weekly 86% ↻1d   Codex weekly 12% ↻4d", max_used: 86)
+    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 240)
     save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }
