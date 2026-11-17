@@ -1,5 +1,7 @@
 //! ccs: list active Claude Code and Codex sessions.
-//! Usage: ccs [--json] [--watch]
+//! Usage: ccs [--json] [--watch] | ccs --limits [--json]
+mod limits;
+
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -47,19 +49,23 @@ fn main() {
     }
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
+    if args.iter().any(|a| a == "--limits") {
+        let l = limits::read(&home());
+        println!("{}", if as_json { limits::to_json(&l).to_string() } else { limits::line(&l) });
+        return;
+    }
     loop {
         let (procs, codex_running) = processes();
         // lsof is only worth running when a codex process exists
         let open = if codex_running { open_codex_rollouts() } else { vec![] };
         let sessions = collect(&home(), &open, &procs);
-        let limits = limits(&home());
         if as_json {
-            println!("{}", json!({"sessions": to_json(&sessions), "limits": limits}));
+            println!("{}", to_json(&sessions));
         } else {
             if watch {
                 print!("\x1b[2J\x1b[H");
             }
-            print_table(&sessions, &limits);
+            print_table(&sessions);
         }
         if !watch {
             break;
@@ -113,6 +119,9 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         let Ok(l) = serde_json::from_str::<Value>(line) else { continue };
         if let Some(t) = l["aiTitle"].as_str() {
             entry["title"] = t.into();
+        }
+        if let Some(t) = l["customTitle"].as_str() {
+            entry["custom_title"] = t.into(); // set by /rename; wins over the generated title
         }
         if l["type"] == "user" {
             if let Some(t) = l["message"]["content"].as_str().filter(|t| !t.starts_with('<')) {
@@ -217,7 +226,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         if let Some(p) = entry["path"].as_str().map(PathBuf::from) {
             scan_transcript(&p, entry);
         }
-        let title = entry["title"].as_str().or(meta["name"].as_str()).unwrap_or("?").to_string();
+        let title = entry["custom_title"].as_str().or(entry["title"].as_str()).or(meta["name"].as_str()).unwrap_or("?").to_string();
         let last_prompt = entry["last_prompt"].as_str().unwrap_or("").to_string();
         let asks = entry["asks"] == true;
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
@@ -323,51 +332,6 @@ fn ci_of(rollup: &Value) -> Option<&'static str> {
     })
 }
 
-/// A rate-limit window, or null when unknown or already reset.
-fn window(v: &Value, used_key: &str) -> Value {
-    match (v[used_key].as_f64(), v["resets_at"].as_u64()) {
-        (Some(used), Some(resets)) if resets > now() => json!({"used": used, "resets_at": resets}),
-        _ => Value::Null,
-    }
-}
-
-/// Account usage: Claude from hooks/statusline.sh, Codex from its newest rollout file.
-fn limits(home: &Path) -> Value {
-    let claude: Value = fs::read_to_string(home.join(".cache/ccs/claude-limits.json")).ok()
-        .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-    let codex = codex_limits(home).unwrap_or(Value::Null);
-    json!({
-        "claude": {"five_hour": window(&claude["five_hour"], "used_percentage"), "week": window(&claude["seven_day"], "used_percentage")},
-        "codex": {"five_hour": window(&codex["primary"], "used_percent"), "week": window(&codex["secondary"], "used_percent")},
-    })
-}
-
-fn codex_limits(home: &Path) -> Option<Value> {
-    let mut path = home.join(".codex/sessions");
-    for _ in 0..4 {
-        // YYYY/MM/DD/rollout-<timestamp>.jsonl: the greatest name at each level is the newest
-        path = fs::read_dir(&path).ok()?.flatten().map(|e| e.path()).max()?;
-    }
-    if fs::metadata(&path).ok()?.modified().ok()?.elapsed().ok()? > Duration::from_secs(7 * 86400) {
-        return None; // both windows have reset since
-    }
-    let text = fs::read_to_string(&path).ok()?;
-    let at = text.rfind("\"rate_limits\":")? + 14;
-    serde_json::Deserializer::from_str(&text[at..]).into_iter::<Value>().next()?.ok()
-}
-
-fn limit_line(l: &Value) -> String {
-    let mut parts = vec![];
-    for (name, tool) in [("Claude", "claude"), ("Codex", "codex")] {
-        for (label, w) in [("5h", "five_hour"), ("wk", "week")] {
-            if let (Some(u), Some(r)) = (l[tool][w]["used"].as_f64(), l[tool][w]["resets_at"].as_u64()) {
-                parts.push(format!("{name} {label} {u:.0}% ↻{}", ago(r.saturating_sub(now()))));
-            }
-        }
-    }
-    parts.join("   ")
-}
-
 fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
     fs::read_dir(home.join(".claude/projects")).ok()?
         .flatten()
@@ -468,11 +432,7 @@ fn one_line(s: &str, max: usize) -> String {
     }
 }
 
-fn print_table(sessions: &[Session], limits: &Value) {
-    let usage = limit_line(limits);
-    if !usage.is_empty() {
-        println!("\x1b[2m{usage}\x1b[0m");
-    }
+fn print_table(sessions: &[Session]) {
     if sessions.is_empty() {
         println!("no active sessions");
     }
@@ -527,7 +487,7 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done.\n\n**Ship it?**"}]}}"#, "\n",
             r#"{"type":"ai-title","aiTitle":"Fix login"}"#, "\n"));
         w(".claude/sessions/4.json", &format!(r#"{{"pid":{me},"sessionId":"fresh","cwd":"/x/proj","status":"waiting","waitingFor":"permission","updatedAt":{}}}"#, now() * 1000));
-        w(".cache/ccs/claude-limits.json", &format!(r#"{{"five_hour":{{"used_percentage":84,"resets_at":1}},"seven_day":{{"used_percentage":20,"resets_at":{}}}}}"#, now() + 3600));
+
         w(".codex/sessions/2026/01/01/rollout-1.jsonl", concat!(
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add tests"}]}}"#, "\n"));
@@ -547,7 +507,6 @@ mod tests {
         let again = collect(&home, &open, &procs);
         let a = again.iter().find(|s| s.id == "abc").unwrap();
         assert_eq!((a.title.as_str(), a.last_prompt.as_str(), a.asks), ("Fix login v2", "first ask", true));
-        let l = limits(&home);
         fs::remove_dir_all(&home).ok();
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
@@ -557,8 +516,6 @@ mod tests {
         assert_eq!(f.summary.as_deref(), Some("Tests pass"), "verdict prefix is stripped");
         let pos = |id: &str| s.iter().position(|s| s.id == id).unwrap();
         assert!(pos("fresh") < pos("abc"), "needs-you sorts first within a repo");
-        assert!(l["claude"]["five_hour"].is_null(), "a window that already reset is dropped");
-        assert_eq!(l["claude"]["week"]["used"], 20.0);
         assert_eq!(ci_of(&json!([{"status": "COMPLETED", "conclusion": "SUCCESS"}, {"state": "SUCCESS"}])), Some("pass"));
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS", "conclusion": ""}, {"state": "SUCCESS"}])), Some("pending"));
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "conclusion": "FAILURE"}])), Some("fail"));

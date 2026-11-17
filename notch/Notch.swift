@@ -14,20 +14,6 @@ struct Session: Decodable, Identifiable {
 
 struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String? }
 
-struct Window: Decodable { let used, resets_at: Double }
-struct ToolLimits: Decodable { let five_hour, week: Window? }
-struct Limits: Decodable { let claude, codex: ToolLimits? }
-struct Output: Decodable { let sessions: [Session]; let limits: Limits? }
-
-/// Known usage windows, e.g. ("Claude wk", window).
-func usage(_ l: Limits?) -> [(String, Window)] {
-    [("Claude", l?.claude), ("Codex", l?.codex)].flatMap { name, t in
-        [("5h", t?.five_hour), ("wk", t?.week)].compactMap { label, w in w.map { ("\(name) \(label)", $0) } }
-    }
-}
-
-func limitColor(_ used: Double, normal: Color) -> Color { used >= 95 ? .red : used >= 80 ? .orange : normal }
-
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
 /// Stable color per repo name (String.hashValue is randomized per launch).
@@ -48,7 +34,7 @@ func focus(_ s: Session) {
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
-    @Published var limits: Limits?
+    @Published var limits: [ToolLimits] = []
     var loaded = false
     var tick = 0
     /// Panel is open. Closed, we poll half as often to save CPU; opening refreshes at once.
@@ -60,7 +46,7 @@ final class Store: ObservableObject {
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
-    init(sample: [Session], finished: Session? = nil, limits: Limits? = nil) { sessions = sample; self.finished = finished; self.limits = limits }
+    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished }
 
     init() {
         refresh()
@@ -107,31 +93,22 @@ final class Store: ObservableObject {
         running = true
         let ccs = self.ccs
         DispatchQueue.global().async {
-            var out: Output?
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: ccs)
-            p.arguments = ["--json"]
-            let pipe = Pipe()
-            p.standardOutput = pipe
-            if (try? p.run()) != nil {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                out = try? JSONDecoder().decode(Output.self, from: data)
-            }
+            let sessions = try? JSONDecoder().decode([Session].self, from: run(ccs, ["--json"]))
+            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, ["--limits", "--json"]))
             DispatchQueue.main.async {
                 self.running = false
-                if let out { self.update(out) }
+                if let limits { self.limits = limits }
+                if let sessions { self.update(sessions) }
                 if self.again { self.again = false; self.refresh() }
             }
         }
     }
 
-    func update(_ out: Output) {
-        let new = out.sessions
+    func update(_ new: [Session]) {
         let wasBusy = Set(sessions.filter { $0.status == "busy" }.map(\.id))
         let wasNeeding = Set(sessions.filter { $0.needs == true }.map(\.id))
         let first = !loaded
-        (sessions, limits, loaded) = (new, out.limits, true)
+        (sessions, loaded) = (new, true)
         guard !first else { return } // no chimes for what was already there at launch
         // "needs you" (Glass) wins over "finished" (Tink)
         let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
@@ -144,6 +121,30 @@ final class Store: ObservableObject {
     }
 }
 
+/// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
+struct ToolLimits: Decodable {
+    struct Window: Decodable {
+        let label: String
+        let used: Double
+        let reset: String?
+        var color: Color { used >= 95 ? .red : used >= 80 ? .orange : .white.opacity(0.75) }
+    }
+    let tool: String
+    let windows: [Window]
+}
+
+func run(_ bin: String, _ args: [String]) -> Data {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: bin)
+    p.arguments = args
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    guard (try? p.run()) != nil else { return Data() }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return data
+}
+
 func ago(_ s: Int) -> String { s < 60 ? "\(s)s" : s < 3600 ? "\(s / 60)m" : s < 86400 ? "\(s / 3600)h" : "\(s / 86400)d" }
 
 struct NotchView: View {
@@ -153,6 +154,7 @@ struct NotchView: View {
     var trailing: CGFloat = 0 // beside only: gap between the pill's right edge and the screen's right edge
     var room: CGFloat = 1400 // width available to the open panel
     @State var open = false
+    @State private var columnsSize: CGSize = .zero
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -165,31 +167,25 @@ struct NotchView: View {
                     count("idle", .green) { $0.status != "busy" && $0.needs != true && $0.stale != true }
                     count("stale", .gray) { $0.stale == true }
                     Spacer(minLength: 24)
-                    ForEach(usage(store.limits), id: \.0) { label, w in
-                        let c = limitColor(w.used, normal: .white.opacity(0.6))
-                        HStack(spacing: 6) {
-                            Text(label)
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(.white.opacity(0.15))
-                                Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
-                            }.frame(width: 44, height: 4)
-                            Text("\(Int(w.used))% · resets in \(ago(max(0, Int(w.resets_at - Date().timeIntervalSince1970))))")
-                        }.foregroundStyle(c)
-                    }
+                    if !store.limits.isEmpty { limitsRow }
                 }.font(.system(size: 11, weight: .semibold))
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
                 // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
-                let gs = groups(store.sessions)
-                // fixed-width columns; when they do not all fit, scroll sideways
-                let wanted = CGFloat(gs.count) * (colW + 18) - 18
-                if wanted > room - 36 {
-                    ScrollView(.horizontal, showsIndicators: false) { columns(gs) }.frame(width: room - 36)
-                    Text("\(gs.count) repos · scroll sideways for more").font(.system(size: 10)).foregroundStyle(.secondary)
+                // Hug the content; scroll only on the axis where it outgrows the screen
+                // (sideways for many repos, down for many sessions).
+                let cols = columns(groups(store.sessions))
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { columnsSize = $0 }
+                let (maxW, maxH) = (room - 36, 520 - notch.height)
+                let (wide, tall) = (columnsSize.width > maxW, columnsSize.height > maxH)
+                if wide || tall {
+                    ScrollView(wide && tall ? [.horizontal, .vertical] : wide ? .horizontal : .vertical, showsIndicators: tall) { cols }
+                        .frame(width: wide ? maxW : nil, height: tall ? maxH : nil)
+                    if wide { Text("scroll sideways for more repos").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else {
-                    columns(gs)
+                    cols
                 }
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
@@ -215,8 +211,9 @@ struct NotchView: View {
                     } else if needing > 0 {
                         Text("\(needing)").font(.system(size: 12, weight: .bold)).foregroundStyle(.pink)
                     } else {
+                        let peak = store.limits.flatMap(\.windows).map(\.used).max() ?? 0
                         Image(systemName: "terminal").font(.system(size: 11))
-                            .foregroundStyle(limitColor(usage(store.limits).map(\.1.used).max() ?? 0, normal: .white.opacity(0.6)))
+                            .foregroundStyle(peak >= 95 ? Color.red : peak >= 80 ? .orange : .white.opacity(0.6))
                     }
                 }
             }
@@ -233,6 +230,26 @@ struct NotchView: View {
         .onHover { h in store.open = h; withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
+    }
+
+    var limitsRow: some View {
+        HStack(spacing: 20) {
+            ForEach(store.limits, id: \.tool) { t in
+                HStack(spacing: 6) {
+                    Text(t.tool).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                    ForEach(t.windows, id: \.label) { w in
+                        HStack(spacing: 4) {
+                            Text(w.label).foregroundStyle(.secondary)
+                            Text("\(Int(w.used.rounded()))%").fontWeight(.semibold).foregroundStyle(w.color)
+                            if let r = w.reset { Text("↻\(r)").foregroundStyle(.tertiary) }
+                        }
+                        .font(.system(size: 11).monospacedDigit())
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(w.color.opacity(0.14)))
+                    }
+                }
+            }
+        }
     }
 
     let colW: CGFloat = 250
@@ -367,8 +384,6 @@ struct NotchApp {
     ]
     (sample[0].branch, sample[0].dirty, sample[1].needs, sample[4].stale) = ("rate-limit", true, true, true)
     sample[0].pr = PR(number: 412, state: "OPEN", url: nil, ci: "pass")
-    let t = Date().timeIntervalSince1970
-    let limits = Limits(claude: ToolLimits(five_hour: Window(used: 84, resets_at: t + 4 * 3600), week: Window(used: 20, resets_at: t + 5 * 86400)), codex: nil)
     let notch = CGSize(width: 190, height: 32)
     func save(_ view: some View, _ name: String, height: CGFloat) {
         let framed = view.frame(width: 1000, height: height)
@@ -380,6 +395,11 @@ struct NotchApp {
               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return print("render failed: \(name)") }
         try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
-    save(NotchView(store: Store(sample: sample, limits: limits), notch: notch, open: true), "notch-open.png", height: 250)
+    let withLimits = Store(sample: sample)
+    withLimits.limits = [
+        ToolLimits(tool: "Claude", windows: [.init(label: "5h", used: 16, reset: "3h"), .init(label: "weekly", used: 86, reset: "23h")]),
+        ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 12, reset: "4d")]),
+    ]
+    save(NotchView(store: withLimits, notch: notch, open: true), "notch-open.png", height: 250)
     save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
 }
