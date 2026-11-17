@@ -146,6 +146,21 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         }
         from += n as u64;
         let Ok(l) = serde_json::from_slice::<Value>(&line) else { continue };
+        if l["type"] == "event_msg" {
+            let payload = &l["payload"];
+            match payload["type"].as_str() {
+                Some("task_started") => {
+                    entry["status"] = "busy".into();
+                    entry["active_turn"] = payload["turn_id"].clone();
+                }
+                Some("task_complete" | "turn_aborted")
+                    if entry["active_turn"].is_null() || payload["turn_id"] == entry["active_turn"] => {
+                    entry["status"] = "idle".into();
+                    entry["active_turn"] = Value::Null;
+                }
+                _ => {}
+            }
+        }
         if l["type"] == "session_meta" && entry["meta"].is_null() {
             let m = &l["payload"];
             entry["meta"] = json!({"id": m["id"], "cwd": m["cwd"], "source": m["source"]});
@@ -191,8 +206,8 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &Value| v["v"] == 3 && v["t"].is_object() && v["git"].is_object()) // v3: transcripts also yield pr-link and cwd
-        .unwrap_or_else(|| json!({"v": 3, "t": {}, "git": {}}));
+        .filter(|v: &Value| v["v"] == 4 && v["t"].is_object() && v["git"].is_object()) // v4: replay Codex lifecycle events
+        .unwrap_or_else(|| json!({"v": 4, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
     out.extend(codex_sessions(home, codex_open, procs, &mut cache));
@@ -458,7 +473,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
             repo: String::new(),
             tty,
             app,
-            status: if idle < 10 { "busy" } else { "idle" }.to_string(),
+            status: entry["status"].as_str().unwrap_or("idle").to_string(),
             idle_secs: idle,
             last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
             summary: None,
@@ -613,6 +628,57 @@ mod tests {
         let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
         assert_eq!(sessions[0].cwd, "/new");
         assert!(sessions[0].last_prompt.is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_status_follows_turn_events_not_file_activity() {
+        let home = env::temp_dir().join(format!("ccs-lifecycle-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("rollout.jsonl");
+        let open = [(path.clone(), 0)];
+        let append = |event: Value| {
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{event}").unwrap();
+        };
+        let status = || collect(&home, &open, &Procs::new()).remove(0).status;
+        fs::write(&path, concat!(
+            r#"{"type":"session_meta","payload":{"id":"cx","source":"cli"}}"#, "\n",
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#, "\n",
+        )).unwrap();
+        let cache_path = home.join(".cache/ccs/cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let mut legacy = json!({"v": 3, "t": {}, "git": {}});
+        legacy["t"][path.to_string_lossy().as_ref()] = json!({
+            "path": path.to_string_lossy(), "len": fs::metadata(&path).unwrap().len(),
+            "meta": {"id": "cx", "source": "cli"}
+        });
+        fs::write(&cache_path, legacy.to_string()).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(now() - 120);
+        fs::File::options().write(true).open(&path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
+        assert_eq!(status(), "busy", "a silent running turn must not trigger completion");
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert_eq!(cache["v"], 4, "replay old cache entries to recover the active turn");
+        assert_eq!(status(), "busy", "keep the active turn across cached refreshes");
+        append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
+        assert_eq!(status(), "idle");
+        append(json!({"type":"event_msg","payload":{"type":"token_count"}}));
+        assert_eq!(status(), "idle", "post-completion writes must not restart the turn");
+        append(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}));
+        assert_eq!(status(), "busy");
+        append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
+        assert_eq!(status(), "busy", "an earlier turn cannot end the active turn");
+        append(json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"two"}}));
+        assert_eq!(status(), "idle");
+        append(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"three"}}));
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(
+            br#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"three""#
+        ).unwrap();
+        assert_eq!(status(), "busy", "retry partial completion events on the next refresh");
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"}}\n").unwrap();
+        assert_eq!(status(), "idle");
+        fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx\",\"source\":\"cli\"}}\n").unwrap();
+        assert_eq!(status(), "idle", "rewriting the transcript discards cached turn state");
         fs::remove_dir_all(home).unwrap();
     }
 
