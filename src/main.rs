@@ -149,7 +149,7 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
     entry["len"] = from.into();
 }
 
-fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
+fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Session> {
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
@@ -157,7 +157,7 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
         .unwrap_or_else(|| json!({"v": 3, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
-    out.extend(codex_sessions(home, codex_open));
+    out.extend(codex_sessions(home, codex_open, procs));
     for s in &mut out {
         let g = &mut cache["git"][s.cwd.as_str()];
         if now().saturating_sub(g["at"].as_u64().unwrap_or(0)) > GIT_TTL {
@@ -363,22 +363,32 @@ fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
 
 /// Codex has no live-session registry, but a running `codex` keeps its rollout file open,
 /// so open rollouts == live sessions. Closed sessions disappear immediately.
-fn open_codex_rollouts() -> Vec<PathBuf> {
-    let Ok(out) = Command::new("lsof").args(["-c", "codex", "-Fn"]).output() else { return vec![] };
-    let mut paths: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout).lines()
-        .filter_map(|l| l.strip_prefix('n'))
-        .filter(|p| p.contains("/.codex/sessions/") && p.ends_with(".jsonl"))
-        .map(PathBuf::from)
-        .collect();
-    paths.sort();
-    paths.dedup();
-    paths
+/// Open rollout files with the pid holding each; the pid gives the session's terminal (tty).
+fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
+    let Ok(out) = Command::new("lsof").args(["-c", "codex", "-Fpn"]).output() else { return vec![] };
+    let mut pid = 0;
+    let mut open = vec![];
+    for l in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(p) = l.strip_prefix('p') {
+            pid = p.parse().unwrap_or(0); // "p<pid>" starts each process's files
+        } else if let Some(p) = l.strip_prefix('n').filter(|p| p.contains("/.codex/sessions/") && p.ends_with(".jsonl")) {
+            open.push((PathBuf::from(p), pid));
+        }
+    }
+    open.sort();
+    open.dedup();
+    open
 }
 
-fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
+fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Session> {
     let index = home.join(".codex/session_index.jsonl");
     let mut out = vec![];
-    for path in open {
+    let mut paths: Vec<&PathBuf> = open.iter().map(|(p, _)| p).collect();
+    paths.dedup(); // `open` is sorted, so one entry per file even if several processes hold it
+    for path in paths {
+        // the holder with a terminal is the CLI (the desktop app's server has none); its tty lets
+        // click-to-jump find the exact Ghostty tab, wherever the session's folder is
+        let tty = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| procs.get(pid).cloned().flatten());
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
@@ -416,7 +426,7 @@ fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
             title,
             cwd: turn_cwd.or_else(|| meta["cwd"].as_str().map(String::from)).unwrap_or_default(),
             repo: String::new(),
-            tty: None,
+            tty,
             status: if idle < 10 { "busy" } else { "idle" }.to_string(),
             idle_secs: idle,
             last_prompt,
@@ -544,7 +554,7 @@ mod tests {
             r#"{"id":"cx1","thread_name":"Old title"}"#, "\n",
             r#"{"id": "cx1", "thread_name": "Newest title"}"#, "\n",
         )).unwrap();
-        let sessions = codex_sessions(&home, &[codex]);
+        let sessions = codex_sessions(&home, &[(codex, 0)], &Procs::new());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].last_prompt, "spaced codex prompt");
         assert_eq!(sessions[0].title, "Newest title");
@@ -586,8 +596,9 @@ mod tests {
         w(".cache/ccs/fresh.txt", "DONE: Tests pass\n");
 
         let rollouts = home.join(".codex/sessions/2026/01/01");
-        let open = [rollouts.join("rollout-1.jsonl"), rollouts.join("rollout-exec.jsonl")]; // rollout-closed is not open
-        let procs = Procs::from([(me as u64, None)]);
+        // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
+        let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1)];
+        let procs = Procs::from([(me as u64, None), (1, None), (2, Some("/dev/ttys042".to_string()))]);
         let s = collect(&home, &open, &procs);
         // second run parses only the appended line, and keeps what the cache already knew
         let t = home.join(".claude/projects/-x-proj/abc.jsonl");
@@ -617,5 +628,6 @@ mod tests {
         assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
         assert_eq!(s.iter().find(|s| s.id == "fresh").unwrap().cwd, "/x/worktrees/proj", "Claude: folder from the transcript, not the registry");
         assert_eq!(x.cwd, "/y/worktrees/api", "Codex: folder from the latest turn");
+        assert_eq!(x.tty.as_deref(), Some("/dev/ttys042"), "Codex: tty of the process holding its rollout");
     }
 }
