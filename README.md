@@ -32,7 +32,7 @@ web-app
 
 Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
 
-Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
+Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
 The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
 
@@ -49,6 +49,13 @@ A Claude session's pull request comes from its own transcript, so the number and
 ```sh
 ./build.sh          # -> build/ccs, build/notch
 build/notch &       # start the overlay
+```
+
+To check editor window matching:
+
+```sh
+swiftc -parse-as-library notch/EditorWindow.swift tests/EditorWindowTests.swift -o /tmp/ccs-editor-tests
+/tmp/ccs-editor-tests
 ```
 
 ## Enable summaries

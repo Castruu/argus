@@ -57,17 +57,13 @@ struct Clickable: ViewModifier {
 let editors = ["Visual Studio Code": "Code", "Visual Studio Code - Insiders": "Code - Insiders",
                "Cursor": "Cursor", "Windsurf": "Windsurf", "VSCodium": "VSCodium"]
 
-/// The folder of the open editor window that contains `cwd`, read from the editor's own window list.
+/// The open folder or workspace file that contains `cwd`, read from the editor's own window list.
 func editorWindow(support: String, containing cwd: String) -> String? {
     let path = NSHomeDirectory() + "/Library/Application Support/\(support)/User/globalStorage/storage.json"
     guard let data = FileManager.default.contents(atPath: path),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let state = json["windowsState"] as? [String: Any] else { return nil }
-    var windows = state["openedWindows"] as? [[String: Any]] ?? []
-    if let last = state["lastActiveWindow"] as? [String: Any] { windows.append(last) }
-    return windows.compactMap { ($0["folder"] as? String).flatMap { URL(string: $0)?.path } }
-        .filter { cwd == $0 || cwd.hasPrefix($0 + "/") }
-        .max { $0.count < $1.count }
+    return editorWindow(state: state, containing: cwd)
 }
 
 /// Brings the session forward in whatever app runs it.
@@ -89,10 +85,9 @@ func focus(_ s: Session) {
         script("focus.applescript")
     } else if name == "Terminal" {
         script("focus-terminal.applescript")
-    } else if let support = editors[name], let folder = editorWindow(support: support, containing: s.cwd) {
-        // An editor has no handle on a terminal tab from outside, but opening a folder that is already
-        // open brings that window forward. Only folders it lists as open are used, so no new window appears.
-        NSWorkspace.shared.open([URL(fileURLWithPath: folder)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    } else if let support = editors[name], let target = editorWindow(support: support, containing: s.cwd) {
+        // Opening an already-open folder or workspace file brings its window forward.
+        NSWorkspace.shared.open([URL(fileURLWithPath: target)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     } else {
         NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
     }
