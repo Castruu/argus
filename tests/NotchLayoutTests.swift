@@ -41,13 +41,17 @@ import SwiftUI
             assert(usage.bar, "Usage bars are missing for \(count) repos")
             assert(usage.height < 18, "Usage label, bar and value should share one line")
             if count == 3 {
-                let narrow = NotchView(store: store, notch: view.notch, room: 600, open: true, forcedPalette: .named("cool"))
+                let narrow = NotchView(store: store, notch: view.notch, room: 460, open: true, forcedPalette: .named("cool"))
                 let narrowImage = ImageRenderer(content: narrow).nsImage!
                 assert(usageShape(narrowImage).bar, "Narrow footers should wrap usage items and keep their bars")
+                assert(narrowImage.size.height > image.size.height, "Narrow footers should wrap when one row cannot fit")
             }
             store.limits = []
             let withoutLimits = ImageRenderer(content: view).nsImage!
             assert(image.size.height > withoutLimits.size.height, "Footer is missing for \(count) repos")
+            if count >= 2 {
+                assert(image.size.height - withoutLimits.size.height < 28, "All three limits should fit on one row for \(count) repos")
+            }
             assert(CGFloat(usage.top) >= withoutLimits.size.height - 4, "Limits should appear below the sessions")
         }
         checkFolderScrolling()
@@ -103,7 +107,7 @@ import SwiftUI
                 let coral = color.alphaComponent > 0.9 && color.redComponent > 0.8 && color.greenComponent < 0.6 && color.blueComponent < 0.6
                 if coral { firstY = min(firstY, y); lastY = max(lastY, y) }
                 run = coral ? run + 1 : 0
-                if run >= 30 { bar = true } // A solid usage bar is longer than any text stroke.
+                if run >= 22 { bar = true } // A solid usage bar is longer than any text stroke.
             }
         }
         return (bar, lastY - firstY + 1, firstY)
