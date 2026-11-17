@@ -5,5 +5,5 @@ cd "$(dirname "$0")"
 cargo build --release -q
 mkdir -p build
 cp target/release/ccs notch/*.applescript build/
-swiftc -O -parse-as-library notch/Notch.swift -o build/notch
+swiftc -O -parse-as-library notch/*.swift -o build/notch
 echo "built: build/ccs build/notch"

@@ -15,7 +15,9 @@ Or in the terminal:
 ```
 $ ccs
 api
-  ● Add rate limiting to /login  claude · api · busy 8s
+  ● Migrate users table  claude · api · needs you 4m
+      Migration ready; waiting on you to approve running it.
+  ● Add rate limiting to /login  claude · api · rate-limit* · #412 ✓ · busy 8s
       Writing middleware tests; no input needed yet.
 web-app
   ● Fix flaky checkout test  codex · web-app · busy 3s
@@ -23,18 +25,18 @@ web-app
 ```
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
-- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). In the notch it turns orange at 80% and red at 95%.
+- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). With the default Cool palette, a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
 
 Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
 
-Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
+Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
 The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
 
-Pull request status needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in. It is looked up in the background at most once every 5 minutes per folder, and skipped for `main`, `master` and stale sessions.
+A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
 ## Requirements
 
@@ -47,6 +49,13 @@ Pull request status needs the [GitHub CLI](https://cli.github.com) (`gh`), logge
 ```sh
 ./build.sh          # -> build/ccs, build/notch
 build/notch &       # start the overlay
+```
+
+To check editor window matching:
+
+```sh
+swiftc -parse-as-library notch/EditorWindow.swift tests/EditorWindowTests.swift -o /tmp/ccs-editor-tests
+/tmp/ccs-editor-tests
 ```
 
 ## Enable summaries

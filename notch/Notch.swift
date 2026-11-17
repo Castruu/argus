@@ -2,7 +2,7 @@
 import AppKit
 import SwiftUI
 
-struct Session: Decodable, Identifiable {
+struct Session: Decodable, Identifiable, Equatable {
     let tool, id, title, project, repo, cwd, status, last_prompt: String
     let idle_secs: Int
     let summary, tty: String?
@@ -13,7 +13,7 @@ struct Session: Decodable, Identifiable {
     var app: String? // bundle of the terminal or editor the session runs in
 }
 
-struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
+struct PR: Decodable, Equatable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
@@ -102,17 +102,13 @@ struct Clickable: ViewModifier {
 let editors = ["Visual Studio Code": "Code", "Visual Studio Code - Insiders": "Code - Insiders",
                "Cursor": "Cursor", "Windsurf": "Windsurf", "VSCodium": "VSCodium"]
 
-/// The folder of the open editor window that contains `cwd`, read from the editor's own window list.
+/// The open folder or workspace file that contains `cwd`, read from the editor's own window list.
 func editorWindow(support: String, containing cwd: String) -> String? {
     let path = NSHomeDirectory() + "/Library/Application Support/\(support)/User/globalStorage/storage.json"
     guard let data = FileManager.default.contents(atPath: path),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let state = json["windowsState"] as? [String: Any] else { return nil }
-    var windows = state["openedWindows"] as? [[String: Any]] ?? []
-    if let last = state["lastActiveWindow"] as? [String: Any] { windows.append(last) }
-    return windows.compactMap { ($0["folder"] as? String).flatMap { URL(string: $0)?.path } }
-        .filter { cwd == $0 || cwd.hasPrefix($0 + "/") }
-        .max { $0.count < $1.count }
+    return editorWindow(state: state, containing: cwd)
 }
 
 /// Brings the session forward in whatever app runs it.
@@ -134,10 +130,9 @@ func focus(_ s: Session) {
         script("focus.applescript")
     } else if name == "Terminal" {
         script("focus-terminal.applescript")
-    } else if let support = editors[name], let folder = editorWindow(support: support, containing: s.cwd) {
-        // An editor has no handle on a terminal tab from outside, but opening a folder that is already
-        // open brings that window forward. Only folders it lists as open are used, so no new window appears.
-        NSWorkspace.shared.open([URL(fileURLWithPath: folder)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    } else if let support = editors[name], let target = editorWindow(support: support, containing: s.cwd) {
+        // Opening an already-open folder or workspace file brings its window forward.
+        NSWorkspace.shared.open([URL(fileURLWithPath: target)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     } else {
         NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
     }
@@ -211,10 +206,11 @@ final class Store: ObservableObject {
                 self.running = false
                 // a window at 0% is noise (e.g. a tool you do not use); a tool with nothing left is dropped
                 if let limits {
-                    self.limits = limits.compactMap { t in
+                    let visible = limits.compactMap { t -> ToolLimits? in
                         let used = t.windows.filter { $0.used.rounded() > 0 }
                         return used.isEmpty ? nil : ToolLimits(tool: t.tool, windows: used)
                     }
+                    if self.limits != visible { self.limits = visible }
                 }
                 if let sessions { self.update(sessions) }
                 if self.again { self.again = false; self.refresh() }
@@ -223,6 +219,7 @@ final class Store: ObservableObject {
     }
 
     func update(_ new: [Session]) {
+        guard !loaded || sessions != new else { return }
         let wasBusy = Set(sessions.filter { $0.status == "busy" }.map(\.id))
         let wasNeeding = Set(sessions.filter { $0.needs == true }.map(\.id))
         let first = !loaded
@@ -241,8 +238,8 @@ final class Store: ObservableObject {
 }
 
 /// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
-struct ToolLimits: Decodable {
-    struct Window: Decodable {
+struct ToolLimits: Decodable, Equatable {
+    struct Window: Decodable, Equatable {
         let label: String
         let used: Double
         let reset: String?
