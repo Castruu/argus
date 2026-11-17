@@ -8,7 +8,8 @@ import Foundation
         let workspace = dir.appendingPathComponent("team project.code-workspace")
         let absolute = dir.appendingPathComponent("shared folder")
         let uri = dir.appendingPathComponent("uri folder")
-        let folders: [[String: String]] = [["path": "api"], ["path": absolute.path], ["uri": uri.absoluteString]]
+        let peer = dir.deletingLastPathComponent().appendingPathComponent("peer")
+        let folders: [[String: String]] = [["path": "api"], ["path": "../peer"], ["path": absolute.path], ["uri": uri.absoluteString]]
         let json = String(decoding: try JSONSerialization.data(withJSONObject: folders), as: UTF8.self)
         try """
         {
@@ -22,9 +23,13 @@ import Foundation
         assert(editorWindow(state: state, containing: api) == workspace.path)
         assert(editorWindow(state: state, containing: api + "/src") == workspace.path)
         assert(editorWindow(state: state, containing: absolute.path + "/src") == workspace.path)
+        assert(editorWindow(state: state, containing: peer.path + "/src") == workspace.path)
         assert(editorWindow(state: state, containing: uri.path) == workspace.path)
         assert(editorWindow(state: state, containing: api + "-other") == nil)
         assert(editorWindow(state: ["lastActiveWindow": window], containing: api) == workspace.path)
+        var remoteWindow = window
+        remoteWindow["remoteAuthority"] = "ssh-remote+host"
+        assert(editorWindow(state: ["openedWindows": [remoteWindow]], containing: api) == nil)
 
         let parent: [String: Any] = ["folder": dir.absoluteString]
         let nested = dir.appendingPathComponent("api/nested")

@@ -6,6 +6,7 @@ func editorWindow(state: [String: Any], containing cwd: String) -> String? {
     if let last = state["lastActiveWindow"] as? [String: Any] { windows.append(last) }
     var candidates: [(target: String, folder: String)] = []
     for window in windows {
+        if let remote = window["remoteAuthority"] as? String, !remote.isEmpty { continue }
         if let folder = window["folder"] as? String, let url = URL(string: folder), url.isFileURL {
             candidates.append((url.path, url.standardizedFileURL.path))
         }
