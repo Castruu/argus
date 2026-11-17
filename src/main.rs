@@ -89,7 +89,8 @@ fn claude_sessions(home: &Path) -> Vec<Session> {
             continue;
         }
         let Ok(meta) = serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap_or_default()) else { continue };
-        if meta["pid"].as_u64().is_none_or(|p| !pid_alive(p)) {
+        // sdk-cli = headless `claude -p` runs (e.g. our own summary hook), not sessions you work in
+        if meta["entrypoint"] == "sdk-cli" || meta["pid"].as_u64().is_none_or(|p| !pid_alive(p)) {
             continue;
         }
         let id = meta["sessionId"].as_str().unwrap_or_default().to_string();
@@ -261,6 +262,7 @@ mod tests {
         let me = std::process::id();
         w(".claude/sessions/1.json", &format!(r#"{{"pid":{me},"sessionId":"abc","cwd":"/x/proj","status":"idle","updatedAt":0}}"#));
         w(".claude/sessions/2.json", r#"{"pid":999999999,"sessionId":"dead"}"#);
+        w(".claude/sessions/3.json", &format!(r#"{{"pid":{me},"sessionId":"headless","entrypoint":"sdk-cli"}}"#));
         w(".claude/projects/-x-proj/abc.jsonl", concat!(
             r#"{"type":"user","message":{"content":"first ask"}}"#, "\n",
             r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#, "\n",
@@ -273,7 +275,7 @@ mod tests {
 
         let s = collect(&home);
         fs::remove_dir_all(&home).ok();
-        assert_eq!(s.len(), 2, "dead pid must be skipped");
+        assert_eq!(s.len(), 2, "dead pid and headless runs must be skipped");
         let c = s.iter().find(|s| s.tool == "claude").unwrap();
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
