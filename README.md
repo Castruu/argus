@@ -105,7 +105,7 @@ For Codex, add a Stop hook to `~/.codex/hooks.json` (keep any existing hooks):
 }
 ```
 
-Codex summaries use `codex exec --model gpt-6-luna` with your existing Codex login. The hook summarizes recent user and assistant text, skips tools and injected instructions, and runs in the background. Luna runs read-only with coding instructions, shell tools, plugins and hooks disabled, without persisting a session. Failed or empty responses keep the previous summary. Claude continues to use Haiku.
+Codex summaries use `codex exec --model gpt-6-luna` with your existing Codex login. The hook summarizes recent user and assistant text, skips tools and injected instructions, and runs in the background. Luna runs read-only with coding instructions, shell tools, plugins and hooks disabled, without persisting a session. Failed or empty responses keep the previous summary. Claude summaries run Haiku through your installed CLI from the cache directory, with project settings and user-configured hooks disabled. Organization-managed hooks may still apply.
 
 Check both summary hooks without calling a model with `python3 tests/SummaryHookTests.py`.
 

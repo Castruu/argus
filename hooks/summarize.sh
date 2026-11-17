@@ -46,9 +46,10 @@ convo=$(jq -r --arg provider "$provider" '
       -c project_doc_max_bytes=0 -c model_reasoning_effort='"low"' \
       -c "base_instructions=\"$prompt\"" --output-last-message "$raw" - >/dev/null 2>&1 || exit 0
   else
+    cd "$dir" || exit 0
     printf '<transcript>\n%s\n</transcript>\n\nWrite the status line for the transcript above.' "$convo" |
       CCS_SUMMARIZING=1 claude -p --model haiku --no-session-persistence --tools "" --strict-mcp-config --disable-slash-commands \
-      --system-prompt "$prompt" > "$raw" 2>/dev/null || exit 0
+      --setting-sources user --settings '{"disableAllHooks":true}' --system-prompt "$prompt" > "$raw" 2>/dev/null || exit 0
   fi
   grep -v '^[[:space:]]*$' "$raw" | head -n 1 | sed -E 's/^[[:space:]*#>-]+//' | cut -c1-120 > "$tmp"
   [ -s "$tmp" ] && mv "$tmp" "$out"

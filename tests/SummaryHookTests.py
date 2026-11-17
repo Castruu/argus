@@ -34,7 +34,7 @@ if not os.getenv('FAIL'):
     else:
         print(output)
 with open(pathlib.Path(os.environ['HOME']) / 'calls.jsonl', 'a') as f:
-    f.write(json.dumps({'args': args, 'text': text, 'guard': os.getenv('CCS_SUMMARIZING')}) + '\\n')
+    f.write(json.dumps({'args': args, 'text': text, 'cwd': os.getcwd(), 'guard': os.getenv('CCS_SUMMARIZING')}) + '\\n')
 sys.exit(1 if os.getenv('FAIL') else 0)
 """)
         stub.chmod(0o755)
@@ -104,7 +104,11 @@ sys.exit(1 if os.getenv('FAIL') else 0)
         self.invoke(provider=None)
         self.wait_for(self.output.exists)
         call = json.loads(self.calls.read_text())
-        self.assertIn("haiku", call["args"])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.cache.resolve())
+        args = call["args"]
+        self.assertIn("haiku", args)
+        self.assertTrue(json.loads(args[args.index("--settings") + 1])["disableAllHooks"])
+        self.assertEqual(args[args.index("--setting-sources") + 1], "user")
         self.assertIn("USER: Fix login\nASSISTANT: Tests pass", call["text"])
 
     def test_invalid_missing_empty_and_recursive_inputs_do_not_call_model(self):
