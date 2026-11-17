@@ -26,6 +26,12 @@ web-app
 - `notch`: macOS overlay; hover the notch to see sessions
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 
+## Requirements
+
+- macOS, Rust (`cargo`) and Xcode command line tools (`swiftc`) to build
+- `jq` for the summary hook
+- [Ghostty](https://ghostty.org) 1.4+ only for click-to-jump; without it everything else works and clicks do nothing
+
 ## Build
 
 ```sh
