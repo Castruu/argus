@@ -1,8 +1,12 @@
 //! Usage limits for the signed-in Claude and Codex accounts, read from what each tool already
 //! caches on disk: no tokens, no network. Numbers are as fresh as the tool's last request.
-use crate::{now, read_jsonl};
+use crate::now;
 use serde_json::{json, Value};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 pub struct Window {
     pub label: String,
@@ -45,8 +49,7 @@ fn codex(home: &Path) -> Vec<Window> {
         .flat_map(|y| newest_first(&y)).flat_map(|m| newest_first(&m)).flat_map(|d| newest_first(&d))
         .take(20); // bounded: don't read every old session if none has limits
     for f in files {
-        let lines = read_jsonl(&f);
-        let Some(rl) = lines.iter().rev().map(|l| &l["payload"]["rate_limits"]).find(|r| r.is_object()) else { continue };
+        let Some(rl) = last_rate_limits(&f) else { continue };
         return ["primary", "secondary"].iter()
             .filter_map(|k| {
                 let w = &rl[*k];
@@ -55,6 +58,37 @@ fn codex(home: &Path) -> Vec<Window> {
             .collect();
     }
     vec![]
+}
+
+/// Search backwards in chunks, keeping a split line for the next read. Limits can be far from
+/// the end during a long turn; memory depends on the longest line, not the whole rollout.
+fn last_rate_limits(path: &Path) -> Option<Value> {
+    const CHUNK: u64 = 256 * 1024;
+    let mut f = File::open(path).ok()?;
+    let mut end = f.metadata().ok()?.len();
+    let mut pending = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let mut buf = vec![0; (end - start) as usize];
+        f.seek(SeekFrom::Start(start)).ok()?;
+        f.read_exact(&mut buf).ok()?;
+        buf.append(&mut pending);
+        let first = if start == 0 { 0 } else {
+            buf.iter().position(|&b| b == b'\n').map_or(buf.len(), |i| i + 1)
+        };
+        let found = String::from_utf8_lossy(&buf[first..]).lines().rev()
+            .filter(|l| l.contains("\"rate_limits\""))
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|l| l["payload"]["rate_limits"].clone())
+            .find(Value::is_object);
+        if found.is_some() {
+            return found;
+        }
+        buf.truncate(first);
+        pending = buf;
+        end = start;
+    }
+    None
 }
 
 /// A window whose reset time has passed is back to 0%, even if the cache hasn't caught up.
@@ -131,6 +165,20 @@ fn parse_iso(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_newest_limits_across_chunks_and_beyond_16_mb() {
+        let path = std::env::temp_dir().join(format!("ccs-tail-{}.jsonl", std::process::id()));
+        let limits = |p: f64| json!({"payload": {"rate_limits": {"primary": {"used_percent": p}}}}).to_string();
+        let filler = format!("{}\n", json!({"payload": {"text": "x".repeat(1000)}}));
+        for suffix in [String::new(), "x".repeat(256 * 1024 - 20), filler.repeat(17_000)] {
+            fs::write(&path, format!("{}\n{}\n{}\n{{\"payload\":", limits(5.0), limits(42.0), suffix)).unwrap();
+            assert_eq!(last_rate_limits(&path).unwrap()["primary"]["used_percent"], 42.0);
+        }
+        fs::write(&path, filler.repeat(1000)).unwrap();
+        assert!(last_rate_limits(&path).is_none());
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn parses_iso_times() {
