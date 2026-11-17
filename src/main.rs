@@ -95,7 +95,7 @@ fn processes() -> (Procs, bool) {
     (procs, codex)
 }
 
-/// Reads what changed in a transcript into its cache entry (title, last_prompt, asks).
+/// Reads what changed in a Claude or Codex transcript into its cache entry.
 /// Transcripts are append-only, so only the bytes added since the last run are parsed.
 fn scan_transcript(path: &Path, entry: &mut Value) {
     let Ok(mut f) = fs::File::open(path) else { return };
@@ -123,6 +123,21 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         }
         from += n as u64;
         let Ok(l) = serde_json::from_slice::<Value>(&line) else { continue };
+        if l["type"] == "session_meta" && entry["meta"].is_null() {
+            let m = &l["payload"];
+            entry["meta"] = json!({"id": m["id"], "cwd": m["cwd"], "source": m["source"]});
+        }
+        if l["type"] == "turn_context" {
+            if let Some(c) = l["payload"]["cwd"].as_str() {
+                entry["cwd"] = c.into();
+            }
+        }
+        if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
+            if let Some(t) = l["payload"]["content"][0]["text"].as_str()
+                .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
+                entry["last_prompt"] = t.chars().take(300).collect::<String>().into();
+            }
+        }
         if let Some(t) = l["aiTitle"].as_str() {
             entry["title"] = t.into();
         }
@@ -157,7 +172,7 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
         .unwrap_or_else(|| json!({"v": 3, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
-    out.extend(codex_sessions(home, codex_open, procs));
+    out.extend(codex_sessions(home, codex_open, procs, &mut cache));
     for s in &mut out {
         let g = &mut cache["git"][s.cwd.as_str()];
         if now().saturating_sub(g["at"].as_u64().unwrap_or(0)) > GIT_TTL {
@@ -201,7 +216,8 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     }
     out.sort_by(|a, b| (&a.repo, !a.needs, a.idle_secs).cmp(&(&b.repo, !b.needs, b.idle_secs)));
     // forget closed sessions, then save only if something changed
-    cache["t"].as_object_mut().unwrap().retain(|k, _| out.iter().any(|s| &s.id == k));
+    cache["t"].as_object_mut().unwrap().retain(|k, _|
+        out.iter().any(|s| &s.id == k) || codex_open.iter().any(|(p, _)| p.to_str() == Some(k)));
     cache["git"].as_object_mut().unwrap().retain(|k, _| out.iter().any(|s| &s.cwd == k));
     if cache != old {
         let tmp = cache_path.with_extension(format!("{}.tmp", std::process::id()));
@@ -380,8 +396,12 @@ fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
     open
 }
 
-fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Session> {
+fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &mut Value) -> Vec<Session> {
+    if open.is_empty() { return vec![]; }
     let index = home.join(".codex/session_index.jsonl");
+    let titles: HashMap<String, String> = read_jsonl(&index, |_| true)
+        .filter_map(|t| Some((t["id"].as_str()?.to_string(), t["thread_name"].as_str()?.to_string())))
+        .collect(); // later entries replace earlier titles
     let mut out = vec![];
     let mut paths: Vec<&PathBuf> = open.iter().map(|(p, _)| p).collect();
     paths.dedup(); // `open` is sorted, so one entry per file even if several processes hold it
@@ -392,44 +412,27 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Se
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let idle = now().saturating_sub(mtime);
-        let (mut meta, mut last_prompt) = (None::<Value>, String::new());
-        // Match tokens, not key/value spacing; parsed fields below decide which lines count.
-        let mut turn_cwd = None::<String>;
-        for l in read_jsonl(path, |l| l.contains("\"session_meta\"") || l.contains("\"user\"") || l.contains("\"turn_context\"")) {
-            if meta.is_none() && l["type"] == "session_meta" {
-                meta = Some(l["payload"].clone());
-            }
-            if l["type"] == "turn_context" {
-                turn_cwd = l["payload"]["cwd"].as_str().map(String::from).or(turn_cwd); // each turn records its folder
-            }
-            if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
-                if let Some(t) = l["payload"]["content"][0]["text"].as_str()
-                    .filter(|t| !t.starts_with('<') && !t.starts_with("# AGENTS.md")) {
-                    last_prompt = t.to_string();
-                }
-            }
-        }
-        let Some(meta) = meta else { continue };
+        let entry = &mut cache["t"][path.to_string_lossy().as_ref()];
+        if entry.is_null() { *entry = json!({"path": path.to_string_lossy()}); }
+        scan_transcript(path, entry);
+        let meta = &entry["meta"];
+        if !meta.is_object() { continue; }
         // subagent = internal reviewer threads; exec = headless `codex exec` runs
         if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
             continue;
         }
         let id = meta["id"].as_str().unwrap_or_default().to_string();
-        let title = read_jsonl(&index, |_| true)
-            .filter(|t| t["id"] == id.as_str())
-            .last()
-            .and_then(|t| t["thread_name"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "?".to_string());
+        let title = titles.get(&id).cloned().unwrap_or_else(|| "?".to_string());
         out.push(Session {
             tool: "codex",
             id,
             title,
-            cwd: turn_cwd.or_else(|| meta["cwd"].as_str().map(String::from)).unwrap_or_default(),
+            cwd: entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string(),
             repo: String::new(),
             tty,
             status: if idle < 10 { "busy" } else { "idle" }.to_string(),
             idle_secs: idle,
-            last_prompt,
+            last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
             summary: None,
             waiting_for: None,
             asks: false,
@@ -554,10 +557,34 @@ mod tests {
             r#"{"id":"cx1","thread_name":"Old title"}"#, "\n",
             r#"{"id": "cx1", "thread_name": "Newest title"}"#, "\n",
         )).unwrap();
-        let sessions = codex_sessions(&home, &[(codex, 0)], &Procs::new());
+        let open = [(codex.clone(), 0)];
+        let mut cache = json!({"t": {}});
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].last_prompt, "spaced codex prompt");
         assert_eq!(sessions[0].title, "Newest title");
+        let key = codex.to_string_lossy();
+        let offset = cache["t"][key.as_ref()]["len"].as_u64().unwrap();
+        assert!(offset < fs::metadata(&codex).unwrap().len(), "retry the partial Codex line");
+        codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(cache["t"][key.as_ref()]["len"], offset);
+        let prompt = "é".repeat(500);
+        let tail = format!("\"}}]}}}}\n{}\n{}\n",
+            json!({"payload": {"type": "message", "role": "user", "content": [{"text": prompt}]}}),
+            json!({"type": "turn_context", "payload": {"cwd": "/x/worktree"}}));
+        fs::OpenOptions::new().append(true).open(&codex).unwrap().write_all(tail.as_bytes()).unwrap();
+        fs::OpenOptions::new().append(true).open(home.join(".codex/session_index.jsonl")).unwrap()
+            .write_all(b"{\"id\":\"cx1\",\"thread_name\":\"Renamed\"}\n").unwrap();
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(sessions[0].last_prompt, "é".repeat(300));
+        assert_eq!(sessions[0].cwd, "/x/worktree");
+        assert_eq!(sessions[0].title, "Renamed");
+        assert_eq!(cache["t"][key.as_ref()]["len"], fs::metadata(&codex).unwrap().len());
+        // Rewrites must discard the previous prompt and turn's folder.
+        fs::write(&codex, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx1\",\"cwd\":\"/new\",\"source\":\"cli\"}}\n").unwrap();
+        let sessions = codex_sessions(&home, &open, &Procs::new(), &mut cache);
+        assert_eq!(sessions[0].cwd, "/new");
+        assert!(sessions[0].last_prompt.is_empty());
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -606,6 +633,10 @@ mod tests {
         let again = collect(&home, &open, &procs);
         let a = again.iter().find(|s| s.id == "abc").unwrap();
         assert_eq!((a.title.as_str(), a.last_prompt.as_str(), a.asks), ("Fix login v2", "first ask", true));
+        let cache: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/cache.json")).unwrap()).unwrap();
+        let codex_path = rollouts.join("rollout-1.jsonl");
+        assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
+            "keep the Codex transcript offset between refresh processes");
         fs::remove_dir_all(&home).ok();
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
