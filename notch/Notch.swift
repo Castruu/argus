@@ -65,10 +65,14 @@ struct NotchView: View {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
-                ForEach(groups(store.sessions), id: \.0) { repo, items in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
-                        ForEach(items) { s in row(s) }
+                // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
+                HStack(alignment: .top, spacing: 18) {
+                    ForEach(groups(store.sessions), id: \.0) { repo, items in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
+                            ForEach(items) { s in row(s) }
+                        }
+                        .frame(width: 250, alignment: .topLeading)
                     }
                 }
             } else {
@@ -83,7 +87,8 @@ struct NotchView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, open ? 18 : 0)
         .padding(.bottom, open ? 14 : 0)
-        .frame(width: open ? 440 : notch.width, height: open ? nil : notch.height, alignment: .topLeading)
+        .frame(width: open ? nil : notch.width, height: open ? nil : notch.height, alignment: .topLeading)
+        .frame(minWidth: open ? 300 : 0)
         .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10).fill(.black))
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.spring(duration: 0.25)) { open = h } }
@@ -132,7 +137,7 @@ struct NotchApp {
         } else {
             notch = CGSize(width: 200, height: 24) // no notch: fake one at the top center
         }
-        let size = CGSize(width: 480, height: 600)
+        let size = CGSize(width: screen.frame.width, height: 600) // full width; transparent areas pass clicks through
         let panel = NSPanel(
             contentRect: NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height,
                                 width: size.width, height: size.height),
