@@ -154,6 +154,7 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
                 Some("task_started") => {
                     entry["status"] = "busy".into();
                     entry["active_turn"] = payload["turn_id"].clone();
+                    entry["started_at"] = payload["started_at"].clone();
                 }
                 Some("task_complete" | "turn_aborted")
                     if entry["active_turn"].is_null() || payload["turn_id"] == entry["active_turn"] => {
@@ -204,8 +205,8 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &Value| v["v"] == 4 && v["t"].is_object() && v["git"].is_object()) // v4: replay Codex lifecycle events
-        .unwrap_or_else(|| json!({"v": 4, "t": {}, "git": {}}));
+        .filter(|v: &Value| v["v"] == 5 && v["t"].is_object() && v["git"].is_object()) // v5: replay Codex turn start times
+        .unwrap_or_else(|| json!({"v": 5, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
     out.extend(codex_sessions(home, codex_open, procs, &mut cache));
@@ -439,10 +440,13 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
         let tty = holder.map(|(_, tty)| tty);
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-        let idle = now().saturating_sub(mtime);
         let entry = &mut cache["t"][path.to_string_lossy().as_ref()];
         if entry.is_null() { *entry = json!({"path": path.to_string_lossy()}); }
         scan_transcript(path, entry);
+        let since = if entry["status"] == "busy" {
+            // shortcut: older Codex events lack started_at; use file activity until those sessions end.
+            entry["started_at"].as_u64().unwrap_or(mtime)
+        } else { mtime };
         let meta = &entry["meta"];
         if !meta.is_object() { continue; }
         // subagent = internal reviewer threads; exec = headless `codex exec` runs
@@ -460,7 +464,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
             tty,
             app,
             status: entry["status"].as_str().unwrap_or("idle").to_string(),
-            idle_secs: idle,
+            idle_secs: now().saturating_sub(since),
             last_prompt: entry["last_prompt"].as_str().unwrap_or_default().to_string(),
             summary: None,
             waiting_for: None,
@@ -689,7 +693,7 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(old)).unwrap();
         assert_eq!(status(), "busy", "a silent running turn must not trigger completion");
         let cache: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
-        assert_eq!(cache["v"], 4, "replay old cache entries to recover the active turn");
+        assert_eq!(cache["v"], 5, "replay old cache entries to recover the active turn");
         assert_eq!(status(), "busy", "keep the active turn across cached refreshes");
         append(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}));
         assert_eq!(status(), "idle");
@@ -710,6 +714,47 @@ mod tests {
         assert_eq!(status(), "idle");
         fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx\",\"source\":\"cli\"}}\n").unwrap();
         assert_eq!(status(), "idle", "rewriting the transcript discards cached turn state");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_working_time_survives_tool_writes_and_cached_refreshes() {
+        let home = env::temp_dir().join(format!("ccs-timing-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let path = home.join("rollout.jsonl");
+        let open = [(path.clone(), 0)];
+        fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"cx\",\"source\":\"cli\"}}\n").unwrap();
+        let append = |payload: Value| {
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+                json!({"type": "event_msg", "payload": payload})).unwrap();
+        };
+        let age = || collect(&home, &open, &Procs::new()).remove(0).idle_secs;
+        let started = now() - 120;
+        append(json!({"type":"task_started","turn_id":"one","started_at":started}));
+        // An already-cached running turn must recover its start without another task_started event.
+        let cache_path = home.join(".cache/ccs/cache.json");
+        fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let mut legacy = json!({"v": 4, "t": {}, "git": {}});
+        legacy["t"][path.to_string_lossy().as_ref()] = json!({
+            "path": path.to_string_lossy(), "len": fs::metadata(&path).unwrap().len(),
+            "meta": {"id": "cx", "source": "cli"}, "status": "busy", "active_turn": "one"
+        });
+        fs::write(&cache_path, legacy.to_string()).unwrap();
+        assert!((120..125).contains(&age()), "recover the turn start from a v4 cache");
+        append(json!({"type":"token_count"}));
+        writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":"done"}})).unwrap();
+        assert!((120..125).contains(&age()), "tool writes must not reset working time");
+        assert!((120..125).contains(&age()), "keep the start across cached refreshes");
+        append(json!({"type":"task_started","turn_id":"two","started_at":now() - 30}));
+        append(json!({"type":"task_complete","turn_id":"one"}));
+        assert!((30..35).contains(&age()), "a new turn resets its own timer");
+        append(json!({"type":"turn_aborted","turn_id":"two"}));
+        assert!(age() < 5, "idle sessions keep measuring time since the last write");
+        append(json!({"type":"task_started","turn_id":"three"}));
+        assert!(age() < 5, "older events without started_at fall back to file activity");
+        append(json!({"type":"task_complete","turn_id":"three"}));
+        assert!(age() < 5);
         fs::remove_dir_all(home).unwrap();
     }
 
