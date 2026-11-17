@@ -272,6 +272,7 @@ struct NotchView: View {
     var room: CGFloat = 1400 // width available to the open panel
     @State var open = false
     @State private var columnsSize: CGSize = .zero
+    @State private var limitsHeight: CGFloat = 0
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
@@ -283,15 +284,7 @@ struct NotchView: View {
                 Spacer().frame(height: notch.height - 6)
                 let repos = groups(store.sessions)
                 let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
-                let showBars = contentWidth >= 3 * colW + 36
-                ViewThatFits(in: .horizontal) {
-                    header(showLimits: true, bars: true)
-                    if !showBars { header(showLimits: true) }
-                    VStack(alignment: .leading, spacing: 8) {
-                        header(showLimits: false)
-                        if !store.limits.isEmpty { limitsRow(bars: showBars) }
-                    }
-                }.frame(width: contentWidth)
+                header.frame(width: contentWidth)
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
@@ -301,7 +294,7 @@ struct NotchView: View {
                 // (sideways for many repos, down for many sessions).
                 let cols = columns(repos)
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { columnsSize = $0 }
-                let (maxW, maxH) = (room - 36, 520 - notch.height)
+                let (maxW, maxH) = (room - 36, 520 - notch.height - (store.limits.isEmpty ? 0 : limitsHeight + 10))
                 let (wide, tall) = (columnsSize.width > maxW, columnsSize.height > maxH)
                 if wide || tall {
                     ScrollView(wide && tall ? [.horizontal, .vertical] : wide ? .horizontal : .vertical, showsIndicators: tall) { cols }
@@ -309,6 +302,10 @@ struct NotchView: View {
                     if wide { Text("scroll sideways for more repos").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else {
                     cols
+                }
+                if !store.limits.isEmpty {
+                    limitsFooter.frame(width: contentWidth)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { limitsHeight = $0 }
                 }
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
@@ -356,35 +353,31 @@ struct NotchView: View {
         .padding(.trailing, beside ? trailing : 0)
     }
 
-    func header(showLimits: Bool, bars: Bool = false) -> some View {
+    var header: some View {
         HStack(spacing: 14) {
             count("working", p.working) { $0.status == "busy" }
             count("need you", p.needs) { $0.needs == true }
             count("idle", p.idle) { $0.status != "busy" && $0.needs != true && $0.stale != true }
             count("stale", p.stale) { $0.stale == true }
             Spacer(minLength: 24)
-            if showLimits && !store.limits.isEmpty { limitsRow(bars: bars) }
             paletteMenu
             soundToggle
         }.font(.system(size: 11, weight: .semibold))
     }
 
-    func limitsRow(bars: Bool) -> some View {
-        HStack(spacing: 12) {
+    var limitsFooter: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: colW), spacing: 18, alignment: .leading)], alignment: .leading, spacing: 8) {
             ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
                 let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
-                let layout = bars ? AnyLayout(HStackLayout(spacing: 6)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
-                layout {
+                HStack(spacing: 6) {
                     Text(label)
-                    if bars {
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(.white.opacity(0.15))
-                            Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
-                        }.frame(width: 44, height: 4)
-                    }
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.15))
+                        Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
+                    }.frame(width: 44, height: 4)
                     Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
                 }
-                .font(.system(size: bars ? 11 : 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(c)
             }
         }

@@ -18,23 +18,22 @@ import SwiftUI
             let expected = max(300, CGFloat(count) * 268 + 18) // columns, gaps and panel padding
             assert(abs(image.size.width - expected) < 1, "Usage widened \(count) repos to \(image.size.width)pt")
             let usage = usageShape(image)
-            assert(usage.bar == (count >= 3), "Wrong progress bar visibility for \(count) repos")
-            if usage.bar { assert(usage.height < 18, "Usage label, bar and value should share one line") }
+            assert(usage.bar, "Usage bars are missing for \(count) repos")
+            assert(usage.height < 18, "Usage label, bar and value should share one line")
             if count == 3 {
                 let narrow = NotchView(store: store, notch: view.notch, room: 600, open: true, forcedPalette: .named("cool"))
                 let narrowImage = ImageRenderer(content: narrow).nsImage!
-                assert(!usageShape(narrowImage).bar, "Less available width should hide bars even with three repos")
+                assert(usageShape(narrowImage).bar, "Narrow footers should wrap usage items and keep their bars")
             }
             store.limits = []
             let withoutLimits = ImageRenderer(content: view).nsImage!
-            if count < 3 {
-                assert(image.size.height > withoutLimits.size.height, "Compact limits are missing for \(count) repos")
-            }
+            assert(image.size.height > withoutLimits.size.height, "Footer is missing for \(count) repos")
+            assert(CGFloat(usage.top) >= withoutLimits.size.height - 4, "Limits should appear below the sessions")
         }
         print("Notch layout tests passed")
     }
 
-    static func usageShape(_ image: NSImage) -> (bar: Bool, height: Int) {
+    static func usageShape(_ image: NSImage) -> (bar: Bool, height: Int, top: Int) {
         let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
         var bar = false, firstY = bitmap.pixelsHigh, lastY = -1
         for y in 0..<bitmap.pixelsHigh {
@@ -47,6 +46,6 @@ import SwiftUI
                 if run >= 30 { bar = true } // A solid usage bar is longer than any text stroke.
             }
         }
-        return (bar, lastY - firstY + 1)
+        return (bar, lastY - firstY + 1, firstY)
     }
 }
