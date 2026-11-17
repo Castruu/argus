@@ -14,4 +14,4 @@ printf '%s' "$input" | jq -r '
     (.rate_limits.five_hour.used_percentage | select(. != null) | "5h \(round)%"),
     (.rate_limits.seven_day.used_percentage | select(. != null) | "wk \(round)%"),
     (.context_window.used_percentage | select(. != null) | "ctx \(round)%")
-  ] | join(" · ")' 2>/dev/null
+  ] | join(" · ") | gsub("[\u0000-\u001f\u007f-\u009f]"; "")' 2>/dev/null

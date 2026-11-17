@@ -515,8 +515,12 @@ fn ago(secs: u64) -> String {
     }
 }
 
+fn terminal_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !c.is_control()).collect()
+}
+
 fn one_line(s: &str, max: usize) -> String {
-    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = terminal_text(s);
     if flat.chars().count() > max {
         format!("{}…", flat.chars().take(max - 1).collect::<String>())
     } else {
@@ -532,10 +536,10 @@ fn print_table(sessions: &[Session]) {
     for s in sessions {
         if s.repo != repo {
             repo = &s.repo;
-            println!("\x1b[1;36m{repo}\x1b[0m");
+            println!("\x1b[1;36m{}\x1b[0m", terminal_text(repo));
         }
         let dot = if s.needs { "\x1b[35m●\x1b[0m" } else if s.status == "busy" { "\x1b[33m●\x1b[0m" } else { "\x1b[32m●\x1b[0m" };
-        let mut branch = s.branch.as_ref().map(|b| format!(" · {b}{}", if s.dirty { "*" } else { "" })).unwrap_or_default();
+        let mut branch = s.branch.as_ref().map(|b| format!(" · {}{}", terminal_text(b), if s.dirty { "*" } else { "" })).unwrap_or_default();
         if let Some(n) = s.pr["number"].as_u64() {
             let mark = match (s.pr["state"].as_str(), s.pr["ci"].as_str()) {
                 (Some("MERGED"), _) => " merged",
@@ -548,8 +552,8 @@ fn print_table(sessions: &[Session]) {
             branch += &format!(" · #{n}{mark}");
         }
         let status = if s.needs { "needs you" } else if s.stale { "stale" } else { &s.status };
-        println!("  {dot} \x1b[{}m{}\x1b[0m  \x1b[2m{} · {}{branch} · {status} {}\x1b[0m",
-            if s.stale { 2 } else { 1 }, one_line(&s.title, 60), s.tool, project(&s.cwd), ago(s.idle_secs));
+        println!("  {dot} \x1b[{}m{}\x1b[0m  \x1b[2m{} · {}{branch} · {} {}\x1b[0m",
+            if s.stale { 2 } else { 1 }, one_line(&s.title, 60), s.tool, terminal_text(project(&s.cwd)), terminal_text(status), ago(s.idle_secs));
         let detail = s.summary.as_deref().unwrap_or(&s.last_prompt);
         if !detail.is_empty() {
             println!("      {}", one_line(detail, 100));
@@ -561,6 +565,12 @@ fn print_table(sessions: &[Session]) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn terminal_fields_cannot_emit_control_characters() {
+        let input = "fix\x1b[2J\u{009b}red\x07\n café";
+        assert_eq!(one_line(input, 100), "fix[2Jred café");
+    }
 
     #[test]
     fn streams_spaced_json_and_retries_partial_transcript_lines() {
