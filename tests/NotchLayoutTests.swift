@@ -50,7 +50,47 @@ import SwiftUI
             assert(image.size.height > withoutLimits.size.height, "Footer is missing for \(count) repos")
             assert(CGFloat(usage.top) >= withoutLimits.size.height - 4, "Limits should appear below the sessions")
         }
+        checkFolderScrolling()
         print("Notch layout tests passed")
+    }
+
+    @MainActor static func checkFolderScrolling() {
+        let sessions = (0..<10).map { i in
+            Session(tool: "claude", id: "\(i)", title: "Session \(i)", project: "repo", repo: "repo",
+                    cwd: "", status: "idle", last_prompt: "continue", idle_secs: 6,
+                    summary: i.isMultiple(of: 2) ? "A longer summary that wraps onto a second line in this folder column." : nil,
+                    tty: nil, stale: i == 2)
+        }
+        let view = NotchView(store: Store(sample: sessions), notch: CGSize(width: 190, height: 32), open: true)
+        let sizes = [1, 2, 3, 4, 10].map { count in
+            ImageRenderer(content: view.columns([("repo", Array(sessions.prefix(count)))])).nsImage!.size
+        }
+        assert(sizes[0].height < sizes[1].height && sizes[1].height < sizes[2].height,
+               "Folders with up to three sessions should hug their rows")
+        assert(sizes[2] == sizes[3] && sizes[2] == sizes[4],
+               "Extra sessions should scroll inside the three-row viewport")
+
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: view.columns([("repo", sessions), ("other", sessions)]))
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: host.fittingSize),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        func scrollViews(_ view: NSView) -> [NSScrollView] {
+            (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+        }
+        let scrolls = scrollViews(host)
+        assert(scrolls.count == 2, "Each crowded folder should have its own scroll view")
+        for scroll in scrolls {
+            assert(scroll.documentView!.frame.height > scroll.contentView.bounds.height,
+                   "Sessions beyond the third must remain reachable by scrolling")
+        }
+        let neighborOrigin = scrolls[1].contentView.bounds.origin
+        scrolls[0].contentView.scroll(to: NSPoint(x: 0, y: 100))
+        assert(scrolls[0].contentView.bounds.origin.y > 0, "The first folder should scroll")
+        assert(scrolls[1].contentView.bounds.origin == neighborOrigin, "Scrolling a folder must leave its neighbor still")
     }
 
     static func usageShape(_ image: NSImage) -> (bar: Bool, height: Int, top: Int) {

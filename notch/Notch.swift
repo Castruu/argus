@@ -268,8 +268,6 @@ struct NotchView: View {
     var trailing: CGFloat = 0 // beside only: gap between the pill's right edge and the screen's right edge
     var room: CGFloat = 1400 // width available to the open panel
     @State var open = false
-    @State private var columnsSize: CGSize = .zero
-    @State private var limitsHeight: CGFloat = 0
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
@@ -287,23 +285,17 @@ struct NotchView: View {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
-                // shortcut: no horizontal scrolling, so ~5 repos fill a laptop screen; add a ScrollView if that's not enough.
-                // Hug the content; scroll only on the axis where it outgrows the screen
-                // (sideways for many repos, down for many sessions).
                 let cols = columns(repos)
-                    .onGeometryChange(for: CGSize.self) { $0.size } action: { columnsSize = $0 }
-                let (maxW, maxH) = (room - 36, 520 - notch.height - (store.limits.isEmpty ? 0 : limitsHeight + 10))
-                let (wide, tall) = (columnsSize.width > maxW, columnsSize.height > maxH)
-                if wide || tall {
-                    ScrollView(wide && tall ? [.horizontal, .vertical] : wide ? .horizontal : .vertical, showsIndicators: tall) { cols }
-                        .frame(width: wide ? maxW : nil, height: tall ? maxH : nil)
-                    if wide { Text("scroll sideways for more repos").font(.system(size: 10)).foregroundStyle(.secondary) }
+                let maxW = room - 36
+                if CGFloat(repos.count) * (colW + 18) - 18 > maxW {
+                    ScrollView(.horizontal, showsIndicators: false) { cols }
+                        .frame(width: maxW)
+                    Text("scroll sideways for more repos").font(.system(size: 10)).foregroundStyle(.secondary)
                 } else {
                     cols
                 }
                 if !store.limits.isEmpty {
                     limitsFooter.frame(width: contentWidth)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { limitsHeight = $0 }
                 }
             } else if let f = store.finished {
                 Spacer().frame(height: notch.height)
@@ -417,8 +409,28 @@ struct NotchView: View {
         HStack(alignment: .top, spacing: 18) {
             ForEach(gs, id: \.0) { repo, items in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(p.repo(repo))
-                    ForEach(items) { s in row(s) }
+                    HStack(spacing: 4) {
+                        Text(repo).foregroundStyle(p.repo(repo))
+                        if items.count > 3 {
+                            Text("(\(items.count))").foregroundStyle(.secondary)
+                                .help("Scroll for more sessions")
+                        }
+                    }.font(.system(size: 11, weight: .bold))
+                    let rows = VStack(alignment: .leading, spacing: 8) {
+                        ForEach(items) { s in row(s) }
+                    }
+                    if items.count > 3 {
+                        // Size the viewport to three real rows, including wrapped summaries.
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(items.prefix(3)) { s in row(s) }
+                        }
+                        .hidden()
+                        .overlay {
+                            ScrollView(.vertical) { rows }
+                        }
+                    } else {
+                        rows
+                    }
                 }
                 .frame(width: colW, alignment: .topLeading)
             }
