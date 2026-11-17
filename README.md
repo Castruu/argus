@@ -27,7 +27,7 @@ web-app
 ```
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
-- `ccs --limits`: Claude 5h/weekly and Codex usage from local caches. Add `--refresh` to fetch current Claude limits with your existing Claude Code login. With the default Cool palette, a bar turns violet at 80% and coral at 95%.
+- `ccs --limits`: Claude 5h/weekly and Codex usage from local caches. Add `--refresh` to fetch current limits with your existing Claude Code and Codex logins. With the default Cool palette, a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Stop hook that writes a one-line AI summary per session (Claude: Haiku; Codex: Luna; at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; keeps Claude limits fresh between `/usage` cache updates
@@ -36,7 +36,7 @@ Each session shows its state: working, idle, needs you (Claude Code explicitly r
 
 Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
-The overlay refreshes local data when session files change. Opening it also fetches current Claude limits in the background; cached values stay visible if the request fails. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
+The overlay refreshes local data when session files change. Opening it also fetches current Claude and Codex limits in the background; cached values stay visible if a request fails. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
 
 A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
@@ -107,9 +107,11 @@ Codex summaries use `codex exec --model gpt-6-luna` with your existing Codex log
 
 Check both summary hooks without calling a model with `python3 tests/SummaryHookTests.py`.
 
-## Keeping Claude limits current
+## Keeping limits current
 
-Opening the notch fetches Claude's current usage with its existing login (macOS Keychain or `~/.claude/.credentials.json`). The request has a five-second timeout and keeps credentials in memory. `ccs --limits --refresh` does the same in the terminal. Ordinary refreshes only read local caches, and reset windows remain visible at 0%.
+Opening the notch fetches current Claude and Codex usage concurrently. Claude uses its existing login from macOS Keychain or `~/.claude/.credentials.json`; Codex uses the ChatGPT login in `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). API-key logins have no subscription quota to fetch. Each request has a five-second timeout and keeps credentials in memory. Existing logins are never renewed or rewritten.
+
+`ccs --limits --refresh` does the same in the terminal. Ordinary refreshes only read local caches; newer Codex session usage events override older API samples, and reset windows remain visible at 0%. A failed fetch keeps the last available values for that provider.
 
 The status-line hook is optional. To also update the cache as you use Claude Code, add to `~/.claude/settings.json`:
 

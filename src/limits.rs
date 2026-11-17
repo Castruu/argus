@@ -1,5 +1,5 @@
 //! Usage limits for the signed-in Claude and Codex accounts, read from what each tool already
-//! caches on disk. An explicit refresh fetches Claude usage with its existing login.
+//! caches on disk. An explicit refresh fetches both providers with their existing logins.
 use crate::now;
 use serde_json::{json, Value};
 use std::{
@@ -23,27 +23,64 @@ pub fn read(home: &Path) -> Vec<(&'static str, Vec<Window>)> {
 
 /// Called on hover, never by the regular local refresh loop. Credentials stay in memory.
 pub fn refresh(home: &Path) -> Result<(), String> {
+    let (claude, codex) = std::thread::scope(|scope| {
+        let claude = scope.spawn(|| refresh_claude(home));
+        let codex = refresh_codex(home);
+        (claude.join().unwrap(), codex)
+    });
+    let errors: Vec<_> = [("Claude", claude), ("Codex", codex)].into_iter()
+        .filter_map(|(tool, result)| result.err().map(|error| format!("{tool}: {error}"))).collect();
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
+fn refresh_claude(home: &Path) -> Result<(), String> {
     let token = claude_token(home).ok_or("Claude Code login unavailable")?;
     // shortcut: uses Claude Code's internal usage endpoint; update if Anthropic changes it.
+    let usage = get_usage("https://api.anthropic.com/api/oauth/usage",
+        &format!("Authorization: Bearer {token}\nanthropic-beta: oauth-2025-04-20\n"))?;
+    save_claude_usage(home, &usage).map_err(|_| "Could not cache usage response".into())
+}
+
+fn refresh_codex(home: &Path) -> Result<(), String> {
+    let auth: Value = serde_json::from_slice(&fs::read(codex_dir(home).join("auth.json"))
+        .map_err(|_| "Codex login unavailable")?).map_err(|_| "Invalid Codex login")?;
+    let token = auth["tokens"]["access_token"].as_str().filter(|s| header_value(s))
+        .ok_or("Usage requires a Codex ChatGPT login")?;
+    let mut headers = format!("Authorization: Bearer {token}\n");
+    if let Some(account) = auth["tokens"]["account_id"].as_str() {
+        if !header_value(account) { return Err("Invalid Codex account ID".into()); }
+        headers.push_str(&format!("ChatGPT-Account-Id: {account}\n"));
+    }
+    // shortcut: uses the same internal usage endpoint as Codex; update if OpenAI changes it.
+    let usage = get_usage("https://chatgpt.com/backend-api/wham/usage", &headers)?;
+    save_codex_usage(home, &usage, &auth["tokens"]["account_id"])
+        .map_err(|_| "Could not cache usage response".into())
+}
+
+fn get_usage(url: &str, headers: &str) -> Result<Value, String> {
     let mut child = Command::new("curl").args([
         "--disable", "--silent", "--fail", "--max-time", "5", "--connect-timeout", "2",
-        "--header", "@-", "--header", "anthropic-beta: oauth-2025-04-20",
-        "https://api.anthropic.com/api/oauth/usage",
+        "--header", "@-", url,
     ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|_| "Could not start usage request")?;
     // Passing the header on stdin keeps the token out of the process arguments.
-    let sent = child.stdin.take().unwrap().write_all(format!("Authorization: Bearer {token}\n").as_bytes());
+    let sent = child.stdin.take().unwrap().write_all(headers.as_bytes());
     let response = child.wait_with_output().map_err(|_| "Usage request failed")?;
     if sent.is_err() || !response.status.success() { return Err("Usage request failed".into()); }
-    let usage: Value = serde_json::from_slice(&response.stdout).map_err(|_| "Invalid usage response")?;
-    save_claude_usage(home, &usage).map_err(|_| "Could not cache usage response".into())
+    serde_json::from_slice(&response.stdout).map_err(|_| "Invalid usage response".into())
+}
+
+fn header_value(value: &str) -> bool { !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic()) }
+
+fn codex_dir(home: &Path) -> PathBuf {
+    std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"))
 }
 
 fn claude_token(home: &Path) -> Option<String> {
     let parse = |data: &[u8]| -> Option<String> {
         let v: Value = serde_json::from_slice(data).ok()?;
         let token = v["claudeAiOauth"]["accessToken"].as_str()?;
-        (!token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic())).then(|| token.to_string())
+        header_value(token).then(|| token.to_string())
     };
     if let Some(token) = fs::read(home.join(".claude/.credentials.json")).ok().and_then(|data| parse(&data)) {
         return Some(token);
@@ -67,10 +104,26 @@ fn save_claude_usage(home: &Path, usage: &Value) -> std::io::Result<()> {
         }
     }
     if cached.is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
-    let path = home.join(".cache/ccs/claude-limits.json");
+    save_usage(home, "claude", Value::Object(cached))
+}
+
+fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Result<()> {
+    let mut limits = json!({});
+    for (source, key) in [("primary_window", "primary"), ("secondary_window", "secondary")] {
+        let w = &usage["rate_limit"][source];
+        if let (Some(used), Some(seconds)) = (w["used_percent"].as_f64().filter(|u| *u >= 0.0), w["limit_window_seconds"].as_u64().filter(|s| *s > 0)) {
+            limits[key] = json!({"used_percent": used, "window_seconds": seconds, "resets_at": w["reset_at"].as_u64()});
+        }
+    }
+    if codex_windows(&limits).is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
+    save_usage(home, "codex", json!({"account_id": account, "fetched_at": now(), "rate_limits": limits}))
+}
+
+fn save_usage(home: &Path, tool: &str, usage: Value) -> std::io::Result<()> {
+    let path = home.join(format!(".cache/ccs/{tool}-limits.json"));
     fs::create_dir_all(path.parent().unwrap())?;
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp, Value::Object(cached).to_string())?;
+    fs::write(&tmp, usage.to_string())?;
     let result = fs::rename(&tmp, &path);
     if result.is_err() { let _ = fs::remove_file(tmp); }
     result
@@ -96,31 +149,42 @@ fn claude(home: &Path) -> Vec<Window> {
         .collect()
 }
 
-/// Codex writes `rate_limits` into its session files on every turn; use the newest one.
+/// Prefer the API sample until a newer usage event arrives in the session logs.
 fn codex(home: &Path) -> Vec<Window> {
+    let auth: Value = serde_json::from_slice(&fs::read(codex_dir(home).join("auth.json")).unwrap_or_default()).unwrap_or_default();
+    let cache: Value = serde_json::from_slice(&fs::read(home.join(".cache/ccs/codex-limits.json")).unwrap_or_default()).unwrap_or_default();
+    let cached = if auth["tokens"]["access_token"].is_string() && cache["account_id"] == auth["tokens"]["account_id"] {
+        codex_windows(&cache["rate_limits"])
+    } else { vec![] };
     let newest_first = |dir: &Path| -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
         v.sort_unstable_by(|a, b| b.cmp(a)); // YYYY/MM/DD/rollout-<timestamp> sorts by time
         v
     };
-    let files = newest_first(&home.join(".codex/sessions")).into_iter()
+    let files = newest_first(&codex_dir(home).join("sessions")).into_iter()
         .flat_map(|y| newest_first(&y)).flat_map(|m| newest_first(&m)).flat_map(|d| newest_first(&d))
         .take(20); // bounded: don't read every old session if none has limits
     for f in files {
-        let Some(rl) = last_rate_limits(&f) else { continue };
-        return ["primary", "secondary"].iter()
-            .filter_map(|k| {
-                let w = &rl[*k];
-                Some(window(label(w["window_minutes"].as_u64()? * 60), w["used_percent"].as_f64()?, w["resets_at"].as_u64()))
-            })
-            .collect();
+        let Some((rl, at)) = last_rate_limits(&f) else { continue };
+        let at = at.or_else(|| fs::metadata(&f).and_then(|m| m.modified()).ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs())).unwrap_or(0);
+        if !cached.is_empty() && cache["fetched_at"].as_u64().unwrap_or(0) >= at { return cached; }
+        return codex_windows(&rl);
     }
-    vec![]
+    cached
+}
+
+fn codex_windows(limits: &Value) -> Vec<Window> {
+    ["primary", "secondary"].iter().filter_map(|k| {
+        let w = &limits[*k];
+        let seconds = w["window_seconds"].as_u64().or_else(|| w["window_minutes"].as_u64()?.checked_mul(60))?;
+        Some(window(label(seconds), w["used_percent"].as_f64()?, w["resets_at"].as_u64()))
+    }).collect()
 }
 
 /// Search backwards in chunks, keeping a split line for the next read. Limits can be far from
 /// the end during a long turn; memory depends on the longest line, not the whole rollout.
-fn last_rate_limits(path: &Path) -> Option<Value> {
+fn last_rate_limits(path: &Path) -> Option<(Value, Option<u64>)> {
     const CHUNK: u64 = 256 * 1024;
     let mut f = File::open(path).ok()?;
     let mut end = f.metadata().ok()?.len();
@@ -137,8 +201,8 @@ fn last_rate_limits(path: &Path) -> Option<Value> {
         let found = String::from_utf8_lossy(&buf[first..]).lines().rev()
             .filter(|l| l.contains("\"rate_limits\""))
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .map(|l| l["payload"]["rate_limits"].clone())
-            .find(Value::is_object);
+            .map(|l| (l["payload"]["rate_limits"].clone(), l["timestamp"].as_str().and_then(parse_iso)))
+            .find(|(limits, _)| limits.is_object());
         if found.is_some() {
             return found;
         }
@@ -231,7 +295,7 @@ mod tests {
         let filler = format!("{}\n", json!({"payload": {"text": "x".repeat(1000)}}));
         for suffix in [String::new(), "x".repeat(256 * 1024 - 20), filler.repeat(17_000)] {
             fs::write(&path, format!("{}\n{}\n{}\n{{\"payload\":", limits(5.0), limits(42.0), suffix)).unwrap();
-            assert_eq!(last_rate_limits(&path).unwrap()["primary"]["used_percent"], 42.0);
+            assert_eq!(last_rate_limits(&path).unwrap().0["primary"]["used_percent"], 42.0);
         }
         fs::write(&path, filler.repeat(1000)).unwrap();
         assert!(last_rate_limits(&path).is_none());
@@ -315,5 +379,45 @@ mod tests {
             assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
         }
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_api_cache_keeps_windows_and_yields_to_newer_events_or_account_switches() {
+        let home = std::env::temp_dir().join(format!("ccs-codex-api-{}", std::process::id()));
+        let dir = home.join(".codex");
+        let day = dir.join("sessions/2026/11/17");
+        fs::create_dir_all(&day).unwrap();
+        let auth = |account| json!({"tokens": {"access_token": "fixture", "account_id": account}}).to_string();
+        fs::write(dir.join("auth.json"), auth("a")).unwrap();
+        let log = |at| json!({"timestamp": at, "payload": {"rate_limits": {
+            "primary": {"window_minutes": 10080, "used_percent": 60, "resets_at": now() + 7200}
+        }}}).to_string();
+        let rollout = day.join("rollout-a.jsonl");
+        fs::write(&rollout, log("1970-01-01T00:00:00Z")).unwrap();
+        let used = || codex(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        let api = json!({"rate_limit": {
+            "primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_at": null},
+            "secondary_window": {"used_percent": 3, "limit_window_seconds": 604800, "reset_at": now() + 7200}
+        }});
+        save_codex_usage(&home, &api, &json!("a")).unwrap();
+        assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 3.0)]);
+        for invalid in [json!({}), json!({"rate_limit": {"primary_window": {"used_percent": -1, "limit_window_seconds": 18000}}})] {
+            assert!(save_codex_usage(&home, &invalid, &json!("a")).is_err());
+            assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 3.0)]);
+        }
+        fs::write(dir.join("auth.json"), auth("b")).unwrap();
+        assert_eq!(used(), [("weekly".into(), 60.0)]);
+        fs::write(dir.join("auth.json"), auth("a")).unwrap();
+        fs::write(&rollout, log("2999-01-01T00:00:00Z")).unwrap();
+        assert_eq!(used(), [("weekly".into(), 60.0)]);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn rejects_header_injection() {
+        assert!(header_value("test-token_123.abc"));
+        for bad in ["", "token\nOther: header", "token\rOther: header", "token value"] {
+            assert!(!header_value(bad));
+        }
     }
 }
