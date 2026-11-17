@@ -2,7 +2,7 @@
 import AppKit
 import SwiftUI
 
-struct Session: Decodable, Identifiable {
+struct Session: Decodable, Identifiable, Equatable {
     let tool, id, title, project, repo, cwd, status, last_prompt: String
     let idle_secs: Int
     let summary, tty: String?
@@ -13,7 +13,7 @@ struct Session: Decodable, Identifiable {
     var app: String? // bundle of the terminal or editor the session runs in
 }
 
-struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
+struct PR: Decodable, Equatable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
@@ -161,10 +161,11 @@ final class Store: ObservableObject {
                 self.running = false
                 // a window at 0% is noise (e.g. a tool you do not use); a tool with nothing left is dropped
                 if let limits {
-                    self.limits = limits.compactMap { t in
+                    let visible = limits.compactMap { t -> ToolLimits? in
                         let used = t.windows.filter { $0.used.rounded() > 0 }
                         return used.isEmpty ? nil : ToolLimits(tool: t.tool, windows: used)
                     }
+                    if self.limits != visible { self.limits = visible }
                 }
                 if let sessions { self.update(sessions) }
                 if self.again { self.again = false; self.refresh() }
@@ -173,6 +174,7 @@ final class Store: ObservableObject {
     }
 
     func update(_ new: [Session]) {
+        guard !loaded || sessions != new else { return }
         let wasBusy = Set(sessions.filter { $0.status == "busy" }.map(\.id))
         let wasNeeding = Set(sessions.filter { $0.needs == true }.map(\.id))
         let first = !loaded
@@ -191,8 +193,8 @@ final class Store: ObservableObject {
 }
 
 /// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
-struct ToolLimits: Decodable {
-    struct Window: Decodable {
+struct ToolLimits: Decodable, Equatable {
+    struct Window: Decodable, Equatable {
         let label: String
         let used: Double
         let reset: String?
