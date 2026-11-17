@@ -6,6 +6,8 @@ Hover the MacBook notch to see every session, grouped by repo. Click one to brin
 
 Each session's Claude or Codex icon is tinted by its status, with the state written below it. Hover the icon to see the provider name.
 
+Hover a session's summary or last prompt to read the full text in a tooltip.
+
 ![Sessions grouped by repo](docs/notch-open.png)
 
 When a session finishes its turn you get a soft chime and this:

@@ -473,8 +473,10 @@ struct NotchView: View {
                 if s.stale != true { // stale rows stay compact
                     if let summary = s.summary {
                         Text(summary).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
+                            .help(summary)
                     } else if !s.last_prompt.isEmpty {
                         Text("You: \(s.last_prompt)").font(.system(size: 11)).italic().foregroundStyle(.white.opacity(0.5)).lineLimit(2)
+                            .help("You: \(s.last_prompt)")
                     }
                 }
             }
