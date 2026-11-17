@@ -12,7 +12,7 @@ struct Session: Decodable, Identifiable {
     var pr: PR?
 }
 
-struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String? }
+struct PR: Decodable { let number: Int; let state: String?; let url: String?; let ci: String?; var draft: Bool? }
 
 let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
 
@@ -127,7 +127,6 @@ struct ToolLimits: Decodable {
         let label: String
         let used: Double
         let reset: String?
-        var color: Color { used >= 95 ? .red : used >= 80 ? .orange : .white.opacity(0.75) }
     }
     let tool: String
     let windows: [Window]
@@ -232,22 +231,21 @@ struct NotchView: View {
         .padding(.trailing, beside ? trailing : 0)
     }
 
+    /// Usage bars, e.g. "Claude 5h ▬▬▭ 84% ↻3h", each colored by its own usage.
     var limitsRow: some View {
-        HStack(spacing: 20) {
-            ForEach(store.limits, id: \.tool) { t in
+        HStack(spacing: 16) {
+            ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
+                let c = w.used >= 95 ? Color.red : w.used >= 80 ? .orange : .white.opacity(0.6)
                 HStack(spacing: 6) {
-                    Text(t.tool).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                    ForEach(t.windows, id: \.label) { w in
-                        HStack(spacing: 4) {
-                            Text(w.label).foregroundStyle(.secondary)
-                            Text("\(Int(w.used.rounded()))%").fontWeight(.semibold).foregroundStyle(w.color)
-                            if let r = w.reset { Text("↻\(r)").foregroundStyle(.tertiary) }
-                        }
-                        .font(.system(size: 11).monospacedDigit())
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(Capsule().fill(w.color.opacity(0.14)))
-                    }
+                    Text(label)
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.15))
+                        Capsule().fill(c).frame(width: 44 * min(w.used, 100) / 100)
+                    }.frame(width: 44, height: 4)
+                    Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
                 }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(c)
             }
         }
     }
@@ -282,11 +280,12 @@ struct NotchView: View {
         }
     }
 
-    /// "#412 ✓": PR number with its CI result; click opens the PR.
+    /// "#412 ✓" / "#13 draft ✗": PR number with its CI result; click opens the PR.
     func prLabel(_ pr: PR) -> some View {
         let (mark, color): (String, Color) = pr.state == "MERGED" ? (" merged", .purple) : pr.state == "CLOSED" ? (" closed", .gray)
             : pr.ci == "fail" ? (" ✗", .red) : pr.ci == "pending" ? (" …", .yellow) : pr.ci == "pass" ? (" ✓", .green) : ("", .white.opacity(0.6))
-        return Text("#\(String(pr.number))\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
+        let draft = pr.draft == true && pr.state == "OPEN" ? " draft" : ""
+        return Text("#\(String(pr.number))\(draft)\(mark)").font(.system(size: 11, weight: .semibold)).foregroundStyle(color).fixedSize()
             .onTapGesture { if let u = pr.url.flatMap({ URL(string: $0) }) { NSWorkspace.shared.open(u) } }
     }
 
@@ -384,6 +383,7 @@ struct NotchApp {
     ]
     (sample[0].branch, sample[0].dirty, sample[1].needs, sample[4].stale) = ("rate-limit", true, true, true)
     sample[0].pr = PR(number: 412, state: "OPEN", url: nil, ci: "pass")
+    (sample[3].branch, sample[3].pr) = ("fix-checkout", PR(number: 87, state: "OPEN", url: nil, ci: "fail", draft: true))
     let notch = CGSize(width: 190, height: 32)
     func save(_ view: some View, _ name: String, height: CGFloat) {
         let framed = view.frame(width: 1000, height: height)
