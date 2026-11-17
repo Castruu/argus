@@ -30,7 +30,7 @@ web-app
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
 
-Each session shows its state: working, idle, needs you (blocked on a permission prompt, or its last message asks you something) or stale (idle for over a day). You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
+Each session shows its state: working, idle, needs you (Claude Code explicitly reports a pending permission, input, sandbox, worker or goal request) or stale (idle for over a day). Informational dialogs such as `/usage`, ordinary text questions and AI summaries do not trigger "needs you". You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
 
 Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
@@ -68,7 +68,7 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-Without it, the last prompt is shown instead, and "needs you" falls back to checking whether the last message ends with a question mark.
+Without it, the last prompt is shown instead. Summaries are for display only; "needs you" always comes from explicit pending requests.
 
 ## Limits when `~/.claude.json` has none
 
