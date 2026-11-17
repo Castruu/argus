@@ -15,7 +15,9 @@ Or in the terminal:
 ```
 $ ccs
 api
-  ● Add rate limiting to /login  claude · api · busy 8s
+  ● Migrate users table  claude · api · needs you 4m
+      Migration ready; waiting on you to approve running it.
+  ● Add rate limiting to /login  claude · api · rate-limit* · #412 ✓ · busy 8s
       Writing middleware tests; no input needed yet.
 web-app
   ● Fix flaky checkout test  codex · web-app · busy 3s
@@ -23,7 +25,7 @@ web-app
 ```
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
-- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). In the notch it turns orange at 80% and red at 95%.
+- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). In the notch a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
@@ -34,7 +36,7 @@ Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal
 
 The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
 
-Pull request status needs the [GitHub CLI](https://cli.github.com) (`gh`), logged in. It is looked up in the background at most once every 5 minutes per folder, and skipped for `main`, `master` and stale sessions.
+A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
 ## Requirements
 
