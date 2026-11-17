@@ -1,5 +1,5 @@
 //! ccs: list active Claude Code and Codex sessions.
-//! Usage: ccs [--json] [--watch] | ccs --limits [--json]
+//! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh]
 mod limits;
 
 use serde_json::{json, Value};
@@ -50,6 +50,9 @@ fn main() {
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
     if args.iter().any(|a| a == "--limits") {
+        if args.iter().any(|a| a == "--refresh") {
+            if let Err(error) = limits::refresh(&home()) { eprintln!("{error}; showing cached limits"); }
+        }
         let l = limits::read(&home());
         println!("{}", if as_json { limits::to_json(&l).to_string() } else { limits::line(&l) });
         return;

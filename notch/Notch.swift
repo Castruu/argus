@@ -145,8 +145,9 @@ final class Store: ObservableObject {
     var loaded = false
     var tick = 0
     /// Panel is open. Closed, we poll half as often to save CPU; opening refreshes at once.
-    var open = false { didSet { if open && !oldValue { refresh() } } }
+    var open = false { didSet { if open && !oldValue { refresh(fetchLimits: true) } } }
     var running = false, again = false
+    var fetchLimitsPending = false
     /// Screen asleep or locked: nothing to show, so do nothing.
     var paused = false { didSet { if oldValue && !paused { refresh() } } }
     var events: FSEventStreamRef?
@@ -194,14 +195,17 @@ final class Store: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(fetchLimits: Bool = false) {
+        fetchLimitsPending = fetchLimitsPending || fetchLimits
         guard !paused else { return }
         guard !running else { again = true; return } // one ccs at a time; run once more when it is done
         running = true
         let ccs = self.ccs
+        let limitsArgs = ["--limits", "--json"] + (fetchLimitsPending ? ["--refresh"] : [])
+        fetchLimitsPending = false
         DispatchQueue.global().async {
             let sessions = try? JSONDecoder().decode([Session].self, from: run(ccs, ["--json"]))
-            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, ["--limits", "--json"]))
+            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, limitsArgs))
             DispatchQueue.main.async {
                 self.running = false
                 if let limits, self.limits != limits { self.limits = limits }

@@ -1,11 +1,12 @@
 //! Usage limits for the signed-in Claude and Codex accounts, read from what each tool already
-//! caches on disk: no tokens, no network. Numbers are as fresh as the tool's last request.
+//! caches on disk. An explicit refresh fetches Claude usage with its existing login.
 use crate::now;
 use serde_json::{json, Value};
 use std::{
     fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::UNIX_EPOCH,
 };
 
@@ -18,6 +19,61 @@ pub struct Window {
 /// `[(tool, windows)]` for each tool that has cached limits.
 pub fn read(home: &Path) -> Vec<(&'static str, Vec<Window>)> {
     [("Claude", claude(home)), ("Codex", codex(home))].into_iter().filter(|(_, w)| !w.is_empty()).collect()
+}
+
+/// Called on hover, never by the regular local refresh loop. Credentials stay in memory.
+pub fn refresh(home: &Path) -> Result<(), String> {
+    let token = claude_token(home).ok_or("Claude Code login unavailable")?;
+    // shortcut: uses Claude Code's internal usage endpoint; update if Anthropic changes it.
+    let mut child = Command::new("curl").args([
+        "--disable", "--silent", "--fail", "--max-time", "5", "--connect-timeout", "2",
+        "--header", "@-", "--header", "anthropic-beta: oauth-2025-04-20",
+        "https://api.anthropic.com/api/oauth/usage",
+    ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|_| "Could not start usage request")?;
+    // Passing the header on stdin keeps the token out of the process arguments.
+    let sent = child.stdin.take().unwrap().write_all(format!("Authorization: Bearer {token}\n").as_bytes());
+    let response = child.wait_with_output().map_err(|_| "Usage request failed")?;
+    if sent.is_err() || !response.status.success() { return Err("Usage request failed".into()); }
+    let usage: Value = serde_json::from_slice(&response.stdout).map_err(|_| "Invalid usage response")?;
+    save_claude_usage(home, &usage).map_err(|_| "Could not cache usage response".into())
+}
+
+fn claude_token(home: &Path) -> Option<String> {
+    let parse = |data: &[u8]| -> Option<String> {
+        let v: Value = serde_json::from_slice(data).ok()?;
+        let token = v["claudeAiOauth"]["accessToken"].as_str()?;
+        (!token.is_empty() && token.bytes().all(|b| b.is_ascii_graphic())).then(|| token.to_string())
+    };
+    if let Some(token) = fs::read(home.join(".claude/.credentials.json")).ok().and_then(|data| parse(&data)) {
+        return Some(token);
+    }
+    if cfg!(target_os = "macos") {
+        let output = Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).output().ok()?;
+        if output.status.success() { return parse(&output.stdout); }
+    }
+    None
+}
+
+fn save_claude_usage(home: &Path, usage: &Value) -> std::io::Result<()> {
+    let mut cached = serde_json::Map::new();
+    for key in ["five_hour", "seven_day"] {
+        if let Some(used) = usage[key]["utilization"].as_f64().filter(|u| *u >= 0.0) {
+            cached.insert(key.into(), json!({
+                "used_percentage": used,
+                "resets_at": usage[key]["resets_at"].as_str().and_then(parse_iso),
+            }));
+        }
+    }
+    if cached.is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
+    let path = home.join(".cache/ccs/claude-limits.json");
+    fs::create_dir_all(path.parent().unwrap())?;
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&tmp, Value::Object(cached).to_string())?;
+    let result = fs::rename(&tmp, &path);
+    if result.is_err() { let _ = fs::remove_file(tmp); }
+    result
 }
 
 /// Prefer the latest /usage or status-line sample, falling back per window if one is missing.
@@ -243,6 +299,21 @@ mod tests {
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
         fs::write(home.join(".cache/ccs/claude-limits.json"), "invalid").unwrap();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn caches_live_usage_without_erasing_it_on_invalid_responses() {
+        let home = std::env::temp_dir().join(format!("ccs-live-usage-{}", std::process::id()));
+        let live = json!({"five_hour": {"utilization": 0, "resets_at": null},
+            "seven_day": {"utilization": 100, "resets_at": "2999-01-01T00:00:00Z"}});
+        save_claude_usage(&home, &live).unwrap();
+        let used = || claude(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
+        for invalid in [json!({}), json!({"error": "unauthorized"}), json!({"five_hour": {"utilization": "unknown"}})] {
+            assert!(save_claude_usage(&home, &invalid).is_err());
+            assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
+        }
         fs::remove_dir_all(home).unwrap();
     }
 }

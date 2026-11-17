@@ -27,7 +27,7 @@ web-app
 ```
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
-- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). With the default Cool palette, a bar turns violet at 80% and coral at 95%.
+- `ccs --limits`: Claude 5h/weekly and Codex usage from local caches. Add `--refresh` to fetch current Claude limits with your existing Claude Code login. With the default Cool palette, a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; keeps Claude limits fresh between `/usage` cache updates
@@ -36,7 +36,7 @@ Each session shows its state: working, idle, needs you (Claude Code explicitly r
 
 Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
-The overlay does not poll. It refreshes when Claude Code rewrites a session file or a hook writes a summary, so a finished turn shows up at once and an idle machine does no work. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
+The overlay refreshes local data when session files change. Opening it also fetches current Claude limits in the background; cached values stay visible if the request fails. It stops while the screen is locked or asleep. With more repos than fit on screen, the panel scrolls sideways.
 
 A Claude session's pull request comes from its own transcript, so the number and link need no network. Its state and CI result need the [GitHub CLI](https://cli.github.com) (`gh`), logged in: they are looked up in the background at most once every 5 minutes and skipped for stale sessions. Codex sessions, and Claude sessions with no recorded PR, show the PR of the branch that is checked out, except on `main` and `master`.
 
@@ -74,6 +74,13 @@ swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/NotchLayoutTests.swi
 /tmp/ccs-layout-tests
 ```
 
+To check live usage refreshes only happen when opening the panel:
+
+```sh
+swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/UsageRefreshTests.swift -o /tmp/ccs-usage-tests
+/tmp/ccs-usage-tests
+```
+
 ## Enable summaries
 
 Add to `~/.claude/settings.json`:
@@ -88,13 +95,15 @@ Without it, the last prompt is shown instead. Summaries are for display only; "n
 
 ## Keeping Claude limits current
 
-`ccs --limits` reads Claude's numbers from `cachedUsageUtilization` in `~/.claude.json`. That cache can be missing or stale. Claude Code also passes the limits to a status line command, so add to `~/.claude/settings.json`:
+Opening the notch fetches Claude's current usage with its existing login (macOS Keychain or `~/.claude/.credentials.json`). The request has a five-second timeout and keeps credentials in memory. `ccs --limits --refresh` does the same in the terminal. Ordinary refreshes only read local caches, and reset windows remain visible at 0%.
+
+The status-line hook is optional. To also update the cache as you use Claude Code, add to `~/.claude/settings.json`:
 
 ```json
 "statusLine": { "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/statusline.sh" }
 ```
 
-It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`. `ccs --limits` uses the newest sample for each window. Without this hook, the overlay only knows Claude's last cached `/usage` result. Reset windows remain visible at 0%.
+It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`. `ccs --limits` uses the newest sample for each window.
 
 ## Running next to another notch app
 
