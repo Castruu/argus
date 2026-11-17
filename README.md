@@ -30,7 +30,7 @@ web-app
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
 
-Each session shows its state: working, idle, needs you (Claude Code explicitly reports a pending permission, input, sandbox, worker or goal request) or stale (idle for over a day). Informational dialogs such as `/usage`, ordinary text questions and AI summaries do not trigger "needs you". You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass.
+Each session shows its state: working, idle, needs you (Claude Code explicitly reports a pending permission, input, sandbox, worker or goal request) or stale (idle for over a day). Informational dialogs such as `/usage`, ordinary text questions and AI summaries do not trigger "needs you". You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass. Click the speaker icon beside the palette icon to mute or unmute both chimes; the choice is remembered across launches, and visual notifications still appear.
 
 Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
@@ -56,6 +56,13 @@ To check editor window matching:
 ```sh
 swiftc -parse-as-library notch/EditorWindow.swift tests/EditorWindowTests.swift -o /tmp/ccs-editor-tests
 /tmp/ccs-editor-tests
+```
+
+To check notification sounds and muting without playing audio:
+
+```sh
+swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/NotificationSoundTests.swift -o /tmp/ccs-notification-tests
+/tmp/ccs-notification-tests
 ```
 
 ## Enable summaries

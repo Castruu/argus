@@ -229,7 +229,9 @@ final class Store: ObservableObject {
         // "needs you" (Glass) wins over "finished" (Tink)
         let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
         guard let done = asking ?? new.first(where: { wasBusy.contains($0.id) && $0.status == "idle" }) else { return }
-        NSSound(named: asking != nil ? "Glass" : "Tink")?.play()
+        if !UserDefaults.standard.bool(forKey: "notificationSoundsMuted") {
+            NSSound(named: asking != nil ? "Glass" : "Tink")?.play()
+        }
         withAnimation(.spring(duration: 0.3)) { finished = done }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
             if self.finished?.id == done.id { withAnimation(.spring(duration: 0.3)) { self.finished = nil } }
@@ -271,6 +273,7 @@ struct NotchView: View {
     @State var open = false
     @State private var columnsSize: CGSize = .zero
     @AppStorage("palette") private var paletteID = "cool"
+    @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
 
@@ -287,6 +290,7 @@ struct NotchView: View {
                     Spacer(minLength: 24)
                     if !store.limits.isEmpty { limitsRow }
                     paletteMenu
+                    soundToggle
                 }.font(.system(size: 11, weight: .semibold))
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
@@ -389,6 +393,17 @@ struct NotchView: View {
             }
     }
 
+    var soundToggle: some View {
+        Button { notificationSoundsMuted.toggle() } label: {
+            Image(systemName: notificationSoundsMuted ? "speaker.slash" : "speaker.wave.2")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+        }
+        .buttonStyle(.plain)
+        .help(notificationSoundsMuted ? "Unmute notification sounds" : "Mute notification sounds")
+        .accessibilityLabel(notificationSoundsMuted ? "Unmute notification sounds" : "Mute notification sounds")
+        .modifier(Clickable())
+    }
+
     let colW: CGFloat = 250
 
     func columns(_ gs: [(String, [Session])]) -> some View {
@@ -472,7 +487,9 @@ final class ClickThroughHost<V: View>: NSHostingView<V> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+#if !NOTCH_TESTS
 @main
+#endif
 struct NotchApp {
     static func main() {
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
