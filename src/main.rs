@@ -93,7 +93,8 @@ fn claude_sessions(home: &Path) -> Vec<Session> {
         let id = meta["sessionId"].as_str().unwrap_or_default().to_string();
         let cwd = meta["cwd"].as_str().unwrap_or_default().to_string();
         let lines = find_claude_transcript(home, &id).map(|p| read_jsonl(&p)).unwrap_or_default();
-        let title = lines.iter().rev().find_map(|l| l["aiTitle"].as_str())
+        let title = lines.iter().rev().find_map(|l| l["customTitle"].as_str())
+            .or_else(|| lines.iter().rev().find_map(|l| l["aiTitle"].as_str()))
             .or(meta["name"].as_str()).unwrap_or("?").to_string();
         let last_prompt = lines.iter().rev()
             .filter(|l| l["type"] == "user")
