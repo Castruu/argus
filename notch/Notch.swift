@@ -276,6 +276,7 @@ struct NotchView: View {
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
 
     var body: some View {
+        let shape = UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10)
         VStack(alignment: .leading, spacing: 10) {
             if open {
                 Spacer().frame(height: notch.height - 6)
@@ -343,7 +344,8 @@ struct NotchView: View {
         .frame(width: open || store.finished != nil ? nil : notch.width,
                height: open || store.finished != nil ? nil : notch.height, alignment: .topLeading)
         .frame(minWidth: open ? 300 : store.finished != nil ? notch.width : 0)
-        .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10).fill(.black))
+        .background(shape.fill(.black))
+        .clipShape(shape)
         .contentShape(Rectangle())
         .onHover { h in store.open = h; withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
