@@ -129,6 +129,9 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
         if let Some(t) = l["customTitle"].as_str() {
             entry["custom_title"] = t.into(); // set by /rename; wins over the generated title
         }
+        if let Some(c) = l["cwd"].as_str() {
+            entry["cwd"] = c.into(); // where the session is now, e.g. a worktree it moved into
+        }
         if l["type"] == "pr-link" {
             // Claude Code records the PR a session works on; no GitHub call needed for number and link
             entry["pr_link"] = json!({"number": l["prNumber"], "url": l["prUrl"]});
@@ -150,8 +153,8 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
     // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
     let cache_path = home.join(".cache/ccs/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &Value| v["v"] == 2 && v["t"].is_object() && v["git"].is_object()) // v2: transcripts also yield pr-link
-        .unwrap_or_else(|| json!({"v": 2, "t": {}, "git": {}}));
+        .filter(|v: &Value| v["v"] == 3 && v["t"].is_object() && v["git"].is_object()) // v3: transcripts also yield pr-link and cwd
+        .unwrap_or_else(|| json!({"v": 3, "t": {}, "git": {}}));
     let mut cache = old.clone();
     let mut out = claude_sessions(home, procs, &mut cache);
     out.extend(codex_sessions(home, codex_open));
@@ -166,17 +169,15 @@ fn collect(home: &Path, codex_open: &[PathBuf], procs: &Procs) -> Vec<Session> {
         s.dirty = g["dirty"] == true;
         s.stale = s.status != "busy" && s.idle_secs > STALE_SECS;
         // Claude sessions record their own PR (pr-link); gh only adds state and CI, looked up by URL.
-        // No pr-link means the session has no PR: the folder's branch may have one it never touched.
-        // Codex records nothing, so it falls back to the checked-out branch, but only while that PR
-        // is open: a merged one on the branch you're still on is old news, not this session's work.
-        // Default branches rarely have a PR, and stale sessions are not worth a GitHub call.
+        // Otherwise use the PR of the branch checked out where the session is now (its worktree, if it
+        // moved into one). Default branches rarely have a PR, and stale sessions are not worth a GitHub call.
         if let Some(url) = s.pr["url"].as_str().map(str::to_string) {
             if !s.stale {
                 let live = pr_state(home, &s.cwd, Some(&url));
                 if !live.is_null() { s.pr = live; }
             }
-        } else if s.tool != "claude" && !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
-            s.pr = open_only(pr_state(home, &s.cwd, None));
+        } else if !s.stale && s.branch.as_deref().is_some_and(|b| !["main", "master", "(detached)"].contains(&b)) {
+            s.pr = pr_state(home, &s.cwd, None);
         }
         s.needs = !s.stale && (s.status == "waiting" || (s.status == "idle" && s.asks));
         let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
@@ -234,7 +235,6 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             continue;
         }
         let id = meta["sessionId"].as_str().unwrap_or_default().to_string();
-        let cwd = meta["cwd"].as_str().unwrap_or_default().to_string();
         let entry = &mut cache["t"][id.as_str()];
         if entry["path"].as_str().is_none_or(|p| !Path::new(p).exists()) {
             if let Some(p) = find_claude_transcript(home, &id) {
@@ -248,6 +248,8 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         let last_prompt = entry["last_prompt"].as_str().unwrap_or("").to_string();
         let asks = entry["asks"] == true;
         let pr = entry["pr_link"].clone();
+        // the registry keeps the folder the session started in; the transcript knows where it is now
+        let cwd = entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string();
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
         out.push(Session {
             tool: "claude",
@@ -297,11 +299,6 @@ fn git_state(cwd: &str) -> (Option<String>, bool) {
     let text = String::from_utf8_lossy(&out.stdout);
     let branch = text.lines().find_map(|l| l.strip_prefix("# branch.head ")).map(str::to_string);
     (branch, text.lines().any(|l| !l.starts_with('#')))
-}
-
-/// The PR if it is still open, else null.
-fn open_only(pr: Value) -> Value {
-    if pr["state"] == "OPEN" { pr } else { Value::Null }
 }
 
 /// Cached PR for `url` if given, else for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
@@ -387,9 +384,13 @@ fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
         let idle = now().saturating_sub(mtime);
         let (mut meta, mut last_prompt) = (None::<Value>, String::new());
         // Match tokens, not key/value spacing; parsed fields below decide which lines count.
-        for l in read_jsonl(path, |l| l.contains("\"session_meta\"") || l.contains("\"user\"")) {
+        let mut turn_cwd = None::<String>;
+        for l in read_jsonl(path, |l| l.contains("\"session_meta\"") || l.contains("\"user\"") || l.contains("\"turn_context\"")) {
             if meta.is_none() && l["type"] == "session_meta" {
                 meta = Some(l["payload"].clone());
+            }
+            if l["type"] == "turn_context" {
+                turn_cwd = l["payload"]["cwd"].as_str().map(String::from).or(turn_cwd); // each turn records its folder
             }
             if l["payload"]["type"] == "message" && l["payload"]["role"] == "user" {
                 if let Some(t) = l["payload"]["content"][0]["text"].as_str()
@@ -413,7 +414,7 @@ fn codex_sessions(home: &Path, open: &[PathBuf]) -> Vec<Session> {
             tool: "codex",
             id,
             title,
-            cwd: meta["cwd"].as_str().unwrap_or_default().to_string(),
+            cwd: turn_cwd.or_else(|| meta["cwd"].as_str().map(String::from)).unwrap_or_default(),
             repo: String::new(),
             tty: None,
             status: if idle < 10 { "busy" } else { "idle" }.to_string(),
@@ -569,9 +570,14 @@ mod tests {
             r#"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7","prRepository":"o/r"}"#, "\n",
             r#"{"type":"ai-title","aiTitle":"Fix login"}"#, "\n"));
         w(".claude/sessions/4.json", &format!(r#"{{"pid":{me},"sessionId":"fresh","cwd":"/x/proj","status":"waiting","waitingFor":"permission","updatedAt":{}}}"#, now() * 1000));
+        // started in /x/proj, then moved into a worktree; the registry still says /x/proj
+        w(".claude/projects/-x-proj/fresh.jsonl", concat!(
+            r#"{"type":"system","cwd":"/x/proj"}"#, "\n",
+            r#"{"type":"system","cwd":"/x/worktrees/proj"}"#, "\n"));
 
         w(".codex/sessions/2026/01/01/rollout-1.jsonl", concat!(
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
+            r#"{"type":"turn_context","payload":{"cwd":"/y/worktrees/api"}}"#, "\n",
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add tests"}]}}"#, "\n"));
         w(".codex/sessions/2026/01/01/rollout-closed.jsonl", r#"{"type":"session_meta","payload":{"id":"gone","cwd":"/z","source":"cli"}}"#);
         w(".codex/sessions/2026/01/01/rollout-exec.jsonl", r#"{"type":"session_meta","payload":{"id":"ex","cwd":"/z","source":"exec"}}"#);
@@ -604,12 +610,12 @@ mod tests {
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS", "conclusion": ""}, {"state": "SUCCESS"}])), Some("pending"));
         assert_eq!(ci_of(&json!([{"status": "IN_PROGRESS"}, {"status": "COMPLETED", "conclusion": "FAILURE"}])), Some("fail"));
         assert_eq!(ci_of(&json!([])), None);
-        assert_eq!(open_only(json!({"number": 1, "state": "OPEN"}))["number"], 1);
-        assert!(open_only(json!({"number": 2, "state": "MERGED"})).is_null(), "a merged branch PR is not shown");
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
         assert_eq!((x.title.as_str(), x.last_prompt.as_str(), x.repo.as_str()), ("API tests", "add tests", "api"));
         assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
+        assert_eq!(s.iter().find(|s| s.id == "fresh").unwrap().cwd, "/x/worktrees/proj", "Claude: folder from the transcript, not the registry");
+        assert_eq!(x.cwd, "/y/worktrees/api", "Codex: folder from the latest turn");
     }
 }
