@@ -29,7 +29,7 @@ web-app
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
 - `ccs --limits`: Claude 5h/weekly and Codex usage from local caches. Add `--refresh` to fetch current Claude limits with your existing Claude Code login. With the default Cool palette, a bar turns violet at 80% and coral at 95%.
 - `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
-- `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
+- `hooks/summarize.sh`: Stop hook that writes a one-line AI summary per session (Claude: Haiku; Codex: Luna; at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; keeps Claude limits fresh between `/usage` cache updates
 
 Each session shows its state: working, idle, needs you (Claude Code explicitly reports a pending permission, input, sandbox, worker or goal request) or stale (idle for over a day). Informational dialogs such as `/usage`, ordinary text questions and AI summaries do not trigger "needs you". You also get the git branch, a dot for uncommitted changes, and the branch's pull request with its CI result (click it to open the PR). A turn that ends plays Tink; a session that starts needing you plays Glass. Click the speaker icon beside the palette icon to mute or unmute both chimes; the choice is remembered across launches, and visual notifications still appear.
@@ -92,6 +92,20 @@ Add to `~/.claude/settings.json`:
 ```
 
 Without it, the last prompt is shown instead. Summaries are for display only; "needs you" always comes from explicit pending requests.
+
+For Codex, add a Stop hook to `~/.codex/hooks.json` (keep any existing hooks):
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/summarize.sh codex" }] }]
+  }
+}
+```
+
+Codex summaries use `codex exec --model gpt-6-luna` with your existing Codex login. The hook summarizes recent user and assistant text, skips tools and injected instructions, and runs in the background. Luna runs read-only with coding instructions, shell tools, plugins and hooks disabled, without persisting a session. Failed or empty responses keep the previous summary. Claude continues to use Haiku.
+
+Check both summary hooks without calling a model with `python3 tests/SummaryHookTests.py`.
 
 ## Keeping Claude limits current
 

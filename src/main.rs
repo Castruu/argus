@@ -746,6 +746,7 @@ mod tests {
         w(".codex/session_index.jsonl", r#"{"id":"cx1","thread_name":"API tests"}"#);
         w(".cache/ccs/abc.txt", "Fixing the login bug\n");
         w(".cache/ccs/fresh.txt", "DONE: Tests pass\n");
+        w(".cache/ccs/cx1.txt", "Adding API tests\n");
 
         let rollouts = home.join(".codex/sessions/2026/01/01");
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
@@ -781,6 +782,7 @@ mod tests {
         assert_eq!((c.title.as_str(), c.last_prompt.as_str()), ("Fix login", "first ask"));
         assert_eq!(c.summary.as_deref(), Some("Fixing the login bug"));
         let x = s.iter().find(|s| s.tool == "codex").unwrap();
+        assert_eq!(x.summary.as_deref(), Some("Adding API tests"));
         assert_eq!((x.title.as_str(), x.last_prompt.as_str(), x.repo.as_str()), ("API tests", "add tests", "api"));
         assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
         assert_eq!(s.iter().find(|s| s.id == "fresh").unwrap().cwd, "/x/worktrees/proj", "Claude: folder from the transcript, not the registry");
