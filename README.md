@@ -25,8 +25,8 @@ web-app
 ```
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
-- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). In the notch a bar turns violet at 80% and coral at 95%.
-- `notch`: macOS overlay; hover the notch to see sessions
+- `ccs --limits`: Claude 5h/weekly and Codex usage, read from what each tool caches locally (no tokens or network). With the default Cool palette, a bar turns violet at 80% and coral at 95%.
+- `notch`: macOS overlay; hover the notch to see sessions. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Claude Code Stop hook that writes a one-line AI summary per session (Haiku, at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; a second source for the Claude limits when `~/.claude.json` has none
 
@@ -94,4 +94,4 @@ then run `build/ccs --watch` in it.
 
 ## Screenshots
 
-Regenerate them from sample data with `build/notch --snapshot docs`.
+Regenerate them from sample data with `build/notch --snapshot docs`. Add `--palettes` to also render every palette on one sheet (`palettes.png`).
