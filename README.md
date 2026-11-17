@@ -4,6 +4,8 @@ See your active Claude Code and Codex sessions at a glance.
 
 Hover the MacBook notch to see every session, grouped by repo. Click one to bring it forward in the app it runs in.
 
+Each session's Claude or Codex icon is tinted by its status, with the state written below it. Hover the icon to see the provider name.
+
 ![Sessions grouped by repo](docs/notch-open.png)
 
 When a session finishes its turn you get a soft chime and this:

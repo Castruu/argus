@@ -461,12 +461,13 @@ struct NotchView: View {
             RoundedRectangle(cornerRadius: 1.5).fill(p.repo(s.repo).opacity(p.id == "focus" ? 0.35 : 1)).frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Circle().fill(color).frame(width: 6, height: 6)
+                    ProviderIcon(tool: s.tool).foregroundStyle(color).frame(width: 14, height: 14)
+                        .help("\(s.tool.capitalized): \(word)")
                     Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 }
-                // status in its color, then tool and branch; yellow dot = uncommitted changes
+                // status in its color, then worktree and branch; colored dot = uncommitted changes
                 HStack(spacing: 5) {
-                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color)) · \(s.tool)\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(p.caution))")
+                    Text("\(Text("\(word) \(ago(s.idle_secs))").foregroundColor(color))\(place)\(Text(s.dirty == true ? " •" : "").foregroundColor(p.caution))")
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     if let pr = s.pr { prLabel(pr) }
                 }
