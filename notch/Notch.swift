@@ -3,15 +3,30 @@ import AppKit
 import SwiftUI
 
 struct Session: Decodable, Identifiable {
-    let tool, id, title, project, status, last_prompt: String
+    let tool, id, title, project, repo, cwd, status, last_prompt: String
     let idle_secs: Int
-    let summary: String?
+    let summary, tty: String?
+}
+
+let binDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+
+/// Stable color per repo name (String.hashValue is randomized per launch).
+func repoColor(_ repo: String) -> Color {
+    let h = repo.utf8.reduce(UInt32(5381)) { ($0 &* 33) &+ UInt32($1) }
+    return Color(hue: Double(h % 360) / 360, saturation: 0.65, brightness: 0.95)
+}
+
+func focus(_ s: Session) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = [binDir.appendingPathComponent("focus.applescript").path, s.tty ?? "", s.cwd]
+    try? p.run()
 }
 
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
-        ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("ccs").path
+        ?? binDir.appendingPathComponent("ccs").path
 
     init() {
         refresh()
@@ -49,22 +64,18 @@ struct NotchView: View {
                 if store.sessions.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
-                ForEach(store.sessions) { s in
-                    HStack(alignment: .top, spacing: 8) {
-                        Circle().fill(s.status == "busy" ? .orange : .green).frame(width: 7, height: 7).padding(.top, 5)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                            Text("\(s.tool) · \(s.project) · \(s.status) \(ago(s.idle_secs))")
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
-                            Text(s.summary ?? s.last_prompt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
-                        }
+                // ccs output is already sorted by repo, so consecutive grouping keeps that order
+                ForEach(groups(store.sessions), id: \.0) { repo, items in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(repo).font(.system(size: 11, weight: .bold)).foregroundStyle(repoColor(repo))
+                        ForEach(items) { s in row(s) }
                     }
                 }
             } else {
                 // collapsed: one dot per busy session, sitting under the notch
                 HStack(spacing: 3) {
-                    ForEach(store.sessions.filter { $0.status == "busy" }) { _ in
-                        Circle().fill(.orange).frame(width: 4, height: 4)
+                    ForEach(store.sessions.filter { $0.status == "busy" }) { s in
+                        Circle().fill(repoColor(s.repo)).frame(width: 4, height: 4)
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom).padding(.bottom, 3)
             }
@@ -78,6 +89,35 @@ struct NotchView: View {
         .onHover { h in withAnimation(.spring(duration: 0.25)) { open = h } }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
+
+    func groups(_ list: [Session]) -> [(String, [Session])] {
+        list.reduce(into: []) { acc, s in
+            if acc.last?.0 == s.repo { acc[acc.count - 1].1.append(s) } else { acc.append((s.repo, [s])) }
+        }
+    }
+
+    func row(_ s: Session) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5).fill(repoColor(s.repo)).frame(width: 3)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Circle().fill(s.status == "busy" ? .orange : .green).frame(width: 6, height: 6)
+                    Text(s.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                }
+                Text("\(s.tool) · \(s.project) · \(s.status) \(ago(s.idle_secs))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(s.summary ?? s.last_prompt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(Rectangle())
+        .onTapGesture { focus(s) }
+    }
+}
+
+/// Lets the first click on the non-activating panel trigger the tap instead of being swallowed.
+final class ClickThroughHost<V: View>: NSHostingView<V> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 @main
@@ -102,7 +142,7 @@ struct NotchApp {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        panel.contentView = NSHostingView(rootView: NotchView(store: Store(), notch: notch))
+        panel.contentView = ClickThroughHost(rootView: NotchView(store: Store(), notch: notch))
         panel.orderFrontRegardless()
         app.run()
     }
