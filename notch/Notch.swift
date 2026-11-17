@@ -25,6 +25,7 @@ func focus(_ s: Session) {
 
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
+    @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
@@ -45,7 +46,18 @@ final class Store: ObservableObject {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
             guard let s = try? JSONDecoder().decode([Session].self, from: data) else { return }
-            DispatchQueue.main.async { self.sessions = s }
+            DispatchQueue.main.async { self.update(s) }
+        }
+    }
+
+    func update(_ new: [Session]) {
+        let wasBusy = Set(sessions.filter { $0.status == "busy" }.map(\.id))
+        sessions = new
+        guard let done = new.first(where: { wasBusy.contains($0.id) && $0.status != "busy" }) else { return }
+        NSSound(named: "Tink")?.play()
+        withAnimation(.spring(duration: 0.3)) { finished = done }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            if self.finished?.id == done.id { withAnimation(.spring(duration: 0.3)) { self.finished = nil } }
         }
     }
 }
@@ -75,6 +87,14 @@ struct NotchView: View {
                         .frame(width: 250, alignment: .topLeading)
                     }
                 }
+            } else if let f = store.finished {
+                Spacer().frame(height: notch.height)
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(repoColor(f.repo))
+                    Text("\(f.repo): \(f.title)").font(.system(size: 12, weight: .medium)).lineLimit(1)
+                }
+                .padding(.horizontal, 14).padding(.bottom, 8)
+                .onTapGesture { focus(f) }
             } else {
                 // collapsed: one dot per busy session, sitting under the notch
                 HStack(spacing: 3) {
@@ -87,8 +107,9 @@ struct NotchView: View {
         .foregroundStyle(.white)
         .padding(.horizontal, open ? 18 : 0)
         .padding(.bottom, open ? 14 : 0)
-        .frame(width: open ? nil : notch.width, height: open ? nil : notch.height, alignment: .topLeading)
-        .frame(minWidth: open ? 300 : 0)
+        .frame(width: open || store.finished != nil ? nil : notch.width,
+               height: open || store.finished != nil ? nil : notch.height, alignment: .topLeading)
+        .frame(minWidth: open ? 300 : store.finished != nil ? notch.width : 0)
         .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10).fill(.black))
         .contentShape(Rectangle())
         .onHover { h in withAnimation(.spring(duration: 0.25)) { open = h } }
