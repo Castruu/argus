@@ -556,6 +556,8 @@ struct NotchApp {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
+        // The overlay stays inactive while the user works in another app.
+        panel.allowsToolTipsWhenApplicationIsInactive = true
         panel.contentView = ClickThroughHost(rootView: NotchView(store: Store(), notch: pill, beside: beside, trailing: trailing, room: screen.frame.width - trailing - 16))
         panel.orderFrontRegardless()
         app.run()
