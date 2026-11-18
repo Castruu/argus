@@ -28,7 +28,7 @@ import json, os, pathlib, sys
 args = sys.argv[1:]
 text = sys.stdin.read()
 if not os.getenv('FAIL'):
-    output = '' if os.getenv('EMPTY') else '\\n**Fixing login and verifying tests\\nExtra line\\n'
+    output = '' if os.getenv('EMPTY') else os.getenv('MODEL_OUTPUT', '\\n**Fixing login and verifying tests\\nExtra line\\n')
     if '--output-last-message' in args:
         pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(output)
     else:
@@ -82,6 +82,21 @@ sys.exit(1 if os.getenv('FAIL') else 0)
         self.assertEqual(call["guard"], "1")
         self.invoke()
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_long_summaries_are_preserved_for_both_providers(self):
+        self.write_transcript([
+            self.message("user", "Implement shared approvals"),
+            {"type": "user", "message": {"content": "Implement shared approvals"}},
+        ])
+        summary = ("Implemented shared approvals in both repositories, verified the backend and frontend tests, "
+                   "and updated the documentation with résumé examples and 日本語 notes. " * 3).strip()
+        self.env["MODEL_OUTPUT"] = f"\n**{summary}\nExtra line\n"
+        for provider in ["claude", "codex"]:
+            with self.subTest(provider=provider):
+                self.invoke(provider=provider, session_id=provider)
+                output = self.cache / f"{provider}.txt"
+                self.wait_for(output.exists)
+                self.assertEqual(output.read_text(), summary + "\n")
 
     def test_failure_and_empty_output_preserve_previous_summary(self):
         self.write_transcript([self.message("user", "Fix login")])
