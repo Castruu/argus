@@ -117,7 +117,6 @@ struct SummaryCard: View {
         .frame(width: 340)
         .frame(maxHeight: 280)
         .padding(12)
-        .background(Color(white: 0.08))
         .environment(\.colorScheme, .dark)
         .onHover(perform: hover)
     }
