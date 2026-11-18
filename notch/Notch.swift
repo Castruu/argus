@@ -270,9 +270,11 @@ struct NotchView: View {
     var trailing: CGFloat = 0 // beside only: gap between the pill's right edge and the screen's right edge
     var room: CGFloat = 1400 // width available to the open panel
     @State var open = false
+    @State private var hoveringPanel = false
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
+    @StateObject var summaryPreview = SummaryPreview()
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
 
     var body: some View {
@@ -341,9 +343,16 @@ struct NotchView: View {
         .background(shape.fill(.black))
         .clipShape(shape)
         .contentShape(Rectangle())
-        .onHover { h in store.open = h; withAnimation(.spring(duration: 0.25)) { open = h } }
+        .onHover { h in hoveringPanel = h; setOpen(h || summaryPreview.isShown) }
+        .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || shown) }
+        .onDisappear { summaryPreview.close() }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
+    }
+
+    private func setOpen(_ value: Bool) {
+        store.open = value
+        withAnimation(.spring(duration: 0.25)) { open = value }
     }
 
     var header: some View {
@@ -499,10 +508,8 @@ struct NotchView: View {
                 if s.stale != true { // stale rows stay compact
                     if let summary = s.summary {
                         Text(summary).font(.system(size: 11)).foregroundStyle(.white.opacity(0.8)).lineLimit(2)
-                            .help(summary)
                     } else if !s.last_prompt.isEmpty {
                         Text("You: \(s.last_prompt)").font(.system(size: 11)).italic().foregroundStyle(.white.opacity(0.5)).lineLimit(2)
-                            .help("You: \(s.last_prompt)")
                     }
                 }
             }
@@ -514,7 +521,8 @@ struct NotchView: View {
         .opacity(s.stale == true ? 0.5 : 1)
         .contentShape(Rectangle())
         .modifier(Clickable())
-        .onTapGesture { focus(s) }
+        .modifier(SummaryHoverCard(text: s.stale == true ? nil : s.summary ?? (s.last_prompt.isEmpty ? nil : "You: \(s.last_prompt)"), preview: summaryPreview))
+        .onTapGesture { summaryPreview.close(); focus(s) }
     }
 }
 
@@ -527,9 +535,9 @@ final class ClickThroughHost<V: View>: NSHostingView<V> {
 @main
 #endif
 struct NotchApp {
-    static func main() {
+    @MainActor static func main() {
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
-            MainActor.assumeIsolated { snapshot(to: CommandLine.arguments[i + 1]) }
+            snapshot(to: CommandLine.arguments[i + 1])
             return
         }
         let app = NSApplication.shared
@@ -558,7 +566,11 @@ struct NotchApp {
         panel.hasShadow = false
         // The overlay stays inactive while the user works in another app.
         panel.allowsToolTipsWhenApplicationIsInactive = true
-        panel.contentView = ClickThroughHost(rootView: NotchView(store: Store(), notch: pill, beside: beside, trailing: trailing, room: screen.frame.width - trailing - 16))
+        let preview = SummaryPreview()
+        let host = ClickThroughHost(rootView: NotchView(store: Store(), notch: pill, beside: beside, trailing: trailing,
+                                                       room: screen.frame.width - trailing - 16, summaryPreview: preview))
+        preview.host = host
+        panel.contentView = host
         panel.orderFrontRegardless()
         app.run()
     }
