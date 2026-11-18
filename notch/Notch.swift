@@ -120,25 +120,26 @@ let quiet = CommandLine.arguments.contains("--quiet")
 /// Called when a click could not bring a session forward; the Store shows it as a toast.
 nonisolated(unsafe) var focusFailed: () -> Void = {}
 
-nonisolated(unsafe) var hotKeyActions: [() -> Void] = []
+nonisolated(unsafe) var hotKeyActions: [UInt32: () -> Void] = [:] // by key code
 
 /// Registers a system-wide shortcut. Carbon hot keys need no Accessibility permission.
-func hotKey(_ key: Int, _ modifiers: Int, _ run: @escaping () -> Void) {
+@discardableResult func hotKey(_ key: Int, _ modifiers: Int, _ run: @escaping () -> Void) -> EventHotKeyRef? {
     if hotKeyActions.isEmpty {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
             var id = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &id)
-            if Int(id.id) < hotKeyActions.count { hotKeyActions[Int(id.id)]() }
+            hotKeyActions[id.id]?()
             return noErr
         }, 1, &spec, nil, nil)
     }
     var ref: EventHotKeyRef?
-    let status = RegisterEventHotKey(UInt32(key), UInt32(modifiers), EventHotKeyID(signature: OSType(0x63637376), id: UInt32(hotKeyActions.count)),
+    let status = RegisterEventHotKey(UInt32(key), UInt32(modifiers), EventHotKeyID(signature: OSType(0x63637376), id: UInt32(key)),
                                      GetApplicationEventTarget(), 0, &ref)
     if status != noErr { FileHandle.standardError.write(Data("shortcut not registered (key \(key), status \(status)): another app may hold it\n".utf8)) }
-    hotKeyActions.append(run)
+    hotKeyActions[UInt32(key)] = run
+    return ref
 }
 
 /// Brings the session forward in whatever app runs it.
@@ -181,8 +182,10 @@ final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var toasts: [Toast] = []
     @Published var limits: [ToolLimits] = []
-    /// Held open by the keyboard shortcut, whatever the mouse does.
-    @Published var pinned = false
+    /// Held open by the keyboard shortcut, whatever the mouse does. Escape, a click outside the panel,
+    /// opening a session or the shortcut again lets go.
+    @Published var pinned = false { didSet { if pinned != oldValue { watchForDismiss(pinned) } } }
+    var escKey: EventHotKeyRef?, outsideClicks: Any?
     var lastJump = ""
     var lastEvent = Date.distantPast, eventPending = false
     var loaded = false
@@ -250,6 +253,19 @@ final class Store: ObservableObject {
         } else if !eventPending {
             eventPending = true
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { self.eventPending = false; self.fileChanged() }
+        }
+    }
+
+    /// While pinned: Escape (a hot key, so no Accessibility permission) and clicks in other apps unpin.
+    /// Clicks on the panel itself are not "outside", so the palette, scrolling and rows keep working.
+    func watchForDismiss(_ on: Bool) {
+        if on {
+            escKey = hotKey(kVK_Escape, 0) { [weak self] in self?.pinned = false }
+            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in self?.pinned = false }
+        } else {
+            if let escKey { UnregisterEventHotKey(escKey) } // give Escape back to the other apps
+            if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
+            (escKey, outsideClicks) = (nil, nil)
         }
     }
 
@@ -427,15 +443,16 @@ struct NotchView: View {
             }
         }
         .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || shown || store.pinned) }
-        .onReceive(store.$pinned.dropFirst()) { setOpen($0 || hoveringPanel || summaryPreview.isShown) }
+        .onReceive(store.$pinned.dropFirst()) { setOpen($0 || hoveringPanel || summaryPreview.isShown, fast: true) }
         .onDisappear { summaryPreview.close() }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
     }
 
-    private func setOpen(_ value: Bool) {
+    /// `fast`: the keyboard shortcut should answer at once, not ease in like a hover.
+    private func setOpen(_ value: Bool, fast: Bool = false) {
         store.open = value
-        withAnimation(.spring(duration: 0.25)) { open = value }
+        withAnimation(fast ? .easeOut(duration: 0.08) : .spring(duration: 0.25)) { open = value }
     }
 
     var header: some View {
@@ -605,7 +622,7 @@ struct NotchView: View {
         .contentShape(Rectangle())
         .modifier(Clickable())
         .modifier(SummaryHoverCard(text: s.stale == true ? nil : s.summary ?? (s.last_prompt.isEmpty ? nil : "You: \(s.last_prompt)"), preview: summaryPreview))
-        .onTapGesture { summaryPreview.close(); focus(s) }
+        .onTapGesture { summaryPreview.close(); store.pinned = false; focus(s) }
     }
 }
 

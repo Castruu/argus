@@ -34,7 +34,7 @@ web-app
 | Summary card | Hover a session for 200 ms to read its full summary or last prompt |
 | Toasts and chimes | One line under the notch per session; Tink for finished, Glass for needs you |
 | Mute | Speaker icon in the panel header (remembered), or `--quiet` for one run |
-| Shortcuts | control-option-S pins the panel open, control-option-N jumps to the next session that needs you |
+| Shortcuts | control-option-S pins the panel open; Esc, a click outside it, or the shortcut again closes it. control-option-N jumps to the next session that needs you |
 | Git and PR | Branch, a dot for uncommitted changes, PR number with CI result (click to open) |
 | Usage limits | Claude and Codex usage below the sessions, fetched live when the panel opens; bars change color at 80% and 95% |
 | Summaries | Optional one-line AI summary per session (Claude: Haiku, Codex: Luna) |
@@ -120,7 +120,7 @@ No daemon and no polling. `ccs` parses only what was appended to each transcript
 cargo test
 python3 tests/SummaryHookTests.py     # both summary hooks, without calling a model
 swiftc -parse-as-library notch/EditorWindow.swift tests/EditorWindowTests.swift -o /tmp/t && /tmp/t
-# overlay tests: NotificationSound, NotchLayout, UsageRefresh, SummaryPreview (opens temporary panels)
+# overlay tests: NotificationSound, NotchLayout, UsageRefresh, Pin, SummaryPreview (opens temporary panels)
 swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/NotchLayoutTests.swift -o /tmp/t && /tmp/t
 build/notch --snapshot docs --palettes  # regenerate the screenshots from sample data
 ```

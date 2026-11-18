@@ -18,7 +18,7 @@ jobs:
       # SummaryPreviewTests opens real panels and needs a display, so it stays a local check
       - name: Overlay tests
         run: |
-          for t in NotificationSound NotchLayout UsageRefresh; do
+          for t in NotificationSound NotchLayout UsageRefresh Pin; do
             swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift "tests/${t}Tests.swift" -o "/tmp/ccs-$t"
             "/tmp/ccs-$t"
           done
