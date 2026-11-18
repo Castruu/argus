@@ -8,7 +8,7 @@ Session data is read locally. Opening the notch checks usage with Anthropic and 
 
 Each session's Claude or Codex icon is tinted by its status, with the state written below it. Hover the icon to see the provider name.
 
-Hover a session's summary or last prompt to read the full text in a tooltip.
+Hover a session for 200 ms to read its full summary or last prompt in a floating card. Move onto the card to keep it open; long text scrolls inside it.
 
 ![Sessions grouped by repo](docs/notch-open.png)
 
@@ -97,6 +97,13 @@ To check live usage refreshes only happen when opening the panel:
 ```sh
 swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/UsageRefreshTests.swift -o /tmp/ccs-usage-tests
 /tmp/ccs-usage-tests
+```
+
+To check summary cards, including hover delays, scrolling and screen-edge placement (opens temporary test panels):
+
+```sh
+swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/SummaryPreviewTests.swift -o /tmp/ccs-summary-preview-tests
+/tmp/ccs-summary-preview-tests
 ```
 
 ## Enable summaries
