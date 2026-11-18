@@ -40,7 +40,7 @@ Each session shows its state: working, idle, needs you (Claude Code explicitly r
 
 Clicking a session opens it where it runs: the exact tab in Ghostty and Terminal, the right folder or multi-folder workspace window in VS Code, Cursor, Windsurf and VSCodium (an editor's terminal tab cannot be picked from outside), and the app itself for anything else.
 
-The overlay refreshes local data when session files change. Opening it also fetches current Claude and Codex limits in the background; cached values stay visible if a request fails. It stops while the screen is locked or asleep. Each repo shows up to three sessions before scrolling vertically within its own column; the repo heading stays visible, with a count when there are more sessions. With more repos than fit on screen, the panel scrolls sideways.
+The closed overlay refreshes when session files change or a session starts. With lifecycle hooks enabled, a normal exit clears its dot immediately. Opening the panel reconciles crashes and missed events, and the open panel refreshes every two seconds. Opening it also fetches current Claude and Codex limits in the background; cached values stay visible if a request fails. It stops while the screen is locked or asleep. Each repo shows up to three sessions before scrolling vertically within its own column; the repo heading stays visible, with a count when there are more sessions. With more repos than fit on screen, the panel scrolls sideways.
 
 PR links must use HTTPS and match the displayed PR number. The viewer accepts `github.com` and exact hostnames registered in GitHub CLI’s `hosts.yml` (for example, after `gh auth login --hostname git.example.com`). An unrecognized link shows as a PR number without a link.
 
@@ -98,6 +98,21 @@ To check live usage refreshes only happen when opening the panel:
 swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/UsageRefreshTests.swift -o /tmp/ccs-usage-tests
 /tmp/ccs-usage-tests
 ```
+
+## Session start and end hooks
+
+Merge these entries into the existing `hooks` object in `~/.codex/hooks.json` to update the notch on a normal exit or resume. Keep any handlers already registered for those events.
+
+```json
+{
+  "SessionStart": [{ "hooks": [{ "type": "command", "command": "'/Applications/CC Sessions Viewer.app/Contents/MacOS/notch' --session-hook codex" }] }],
+  "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "'/Applications/CC Sessions Viewer.app/Contents/MacOS/notch' --session-hook codex" }] }]
+}
+```
+
+For Claude Code, use the same entries in `~/.claude/settings.json` with `--session-hook claude`. For a source build, use the absolute path to `build/notch`. Review the new commands in Codex with `/hooks`.
+
+The hooks send the provider and session ID to the running overlay on this Mac. Hovers still refresh the session list if a hook is missing or a process is force-quit.
 
 ## Enable summaries
 

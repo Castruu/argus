@@ -4,6 +4,7 @@ import SwiftUI
 
 struct Session: Decodable, Identifiable, Equatable {
     let tool, id, title, project, repo, cwd, status, last_prompt: String
+    var hookID: String { "\(tool)/\(id)" }
     let idle_secs: Int
     let summary, tty: String?
     // optional so older ccs output still decodes
@@ -140,18 +141,52 @@ func focus(_ s: Session) {
     }
 }
 
+// Both providers deliver hook_event_name and session_id on stdin, before the process exits.
+enum SessionHook: String, Decodable, CaseIterable {
+    case start = "SessionStart", end = "SessionEnd"
+    var notification: Notification.Name { .init("com.github.castruu.cc-sessions-viewer." + rawValue) }
+
+    struct Input: Decodable {
+        let hook_event_name: SessionHook
+        let session_id: String
+    }
+
+    static func post(provider: String, input: Data) -> Bool {
+        guard ["claude", "codex"].contains(provider), let event = try? JSONDecoder().decode(Input.self, from: input),
+              !event.session_id.isEmpty else { return false }
+        DistributedNotificationCenter.default().postNotificationName(event.hook_event_name.notification,
+            object: "\(provider)/\(event.session_id)", userInfo: nil, deliverImmediately: true)
+        return true
+    }
+}
+
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
     @Published var limits: [ToolLimits] = []
     var loaded = false
-    var tick = 0
-    /// Panel is open. Closed, we poll half as often to save CPU; opening refreshes at once.
-    var open = false { didSet { if open && !oldValue { refresh(fetchLimits: true) } } }
+    private var timer: Timer?
+    private var ended = Set<String>()
+    var open = false { didSet {
+        guard open != oldValue else { return }
+        setTimer()
+        if open { refresh(fetchLimits: true) }
+    } }
     var running = false, again = false
     var fetchLimitsPending = false
-    /// Screen asleep or locked: nothing to show, so do nothing.
-    var paused = false { didSet { if oldValue && !paused { refresh() } } }
+    var paused = false { didSet {
+        guard paused != oldValue else { return }
+        setTimer()
+        if !paused { refresh() }
+    } }
+
+    private func setTimer() {
+        timer?.invalidate()
+        timer = nil
+        guard open && !paused else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+        timer?.tolerance = 0.5
+    }
     var events: FSEventStreamRef?
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
@@ -159,12 +194,16 @@ final class Store: ObservableObject {
     init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished; repoNames = Set(sample.map(\.repo)).sorted() }
 
     init() {
-        refresh()
+        for hook in SessionHook.allCases {
+            DistributedNotificationCenter.default().addObserver(forName: hook.notification, object: nil, queue: .main) { [weak self] note in
+                if let id = note.object as? String { self?.sessionHook(hook, id: id) }
+            }
+        }
         // File events drive updates: Claude rewrites a session file when its status changes, and the hooks
         // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"].filter { FileManager.default.fileExists(atPath: $0) }
+        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"]
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in
             // ccs's own cache and the temp files are not news
@@ -177,15 +216,7 @@ final class Store: ObservableObject {
             FSEventStreamSetDispatchQueue(events, .main)
             FSEventStreamStart(events)
         }
-        // The timer only covers what has no file event: the open panel's clocks, a Codex session going idle
-        // (10s after its last write), processes that died, and git or PR changes.
-        let timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.tick += 1
-            let codexBusy = self.sessions.contains { $0.tool == "codex" && $0.status == "busy" }
-            if self.tick % (self.open ? 1 : codexBusy ? 2 : 15) == 0 { self.refresh() }
-        }
-        timer.tolerance = 0.5 // lets macOS batch our wakeups with others
+        refresh()
         let pause: [(NotificationCenter, String, Bool)] = [
             (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidSleepNotification.rawValue, true),
             (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidWakeNotification.rawValue, false),
@@ -194,6 +225,20 @@ final class Store: ObservableObject {
         ]
         for (center, name, value) in pause {
             center.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in self?.paused = value }
+        }
+    }
+
+    func sessionHook(_ hook: SessionHook, id: String) {
+        switch hook {
+        case .end:
+            ended.insert(id)
+            if finished?.hookID == id { finished = nil }
+            if sessions.contains(where: { $0.hookID == id }) {
+                update(sessions.filter { $0.hookID != id })
+            }
+        case .start:
+            ended.remove(id)
+            refresh()
         }
     }
 
@@ -211,7 +256,11 @@ final class Store: ObservableObject {
             DispatchQueue.main.async {
                 self.running = false
                 if let limits, self.limits != limits { self.limits = limits }
-                if let sessions { self.update(sessions) }
+                if let sessions {
+                    // The end hook can arrive while ccs still sees an open transcript.
+                    self.ended.formIntersection(sessions.map(\.hookID))
+                    self.update(sessions.filter { !self.ended.contains($0.hookID) })
+                }
                 if self.again { self.again = false; self.refresh() }
             }
         }
@@ -528,6 +577,12 @@ final class ClickThroughHost<V: View>: NSHostingView<V> {
 #endif
 struct NotchApp {
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "--session-hook" {
+            guard CommandLine.arguments.count == 3,
+                  SessionHook.post(provider: CommandLine.arguments[2], input: FileHandle.standardInput.readDataToEndOfFile())
+            else { exit(1) }
+            return
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
             MainActor.assumeIsolated { snapshot(to: CommandLine.arguments[i + 1]) }
             return
