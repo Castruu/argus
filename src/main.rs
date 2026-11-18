@@ -39,7 +39,7 @@ const STALE_SECS: u64 = 86400;
 const GIT_TTL: u64 = 30; // seconds between `git status` runs per folder
 const PR_TTL: u64 = 300; // seconds between GitHub lookups per folder
 
-/// Live pid -> (tty, parent pid, command).
+/// Live pid -> (ps terminal field, parent pid, command).
 type Procs = HashMap<u64, (Option<String>, u64, String)>;
 
 fn main() {
@@ -91,9 +91,32 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
-/// One `ps` call for everything: live pids with their tty, parent and command, and whether Codex runs at all.
+// macOS ps spends most of its time resolving terminal names for unrelated processes.
+#[cfg(target_os = "macos")]
+const PS_FIELDS: &str = "pid=,ppid=,tdev=,comm=";
+#[cfg(not(target_os = "macos"))]
+const PS_FIELDS: &str = "pid=,ppid=,tty=,comm=";
+
+#[cfg(target_os = "macos")]
+fn tty_path(field: &str) -> Option<String> {
+    use std::ffi::{CStr, c_char};
+    unsafe extern "C" {
+        fn devname_r(dev: i32, mode: u16, buf: *mut c_char, len: i32) -> *mut c_char;
+    }
+    let (major, minor) = field.split_once('/')?;
+    let dev = (u32::from(major.parse::<u8>().ok()?) << 24) | minor.parse::<u32>().ok()?;
+    let mut buf = [0; 1024];
+    // Darwin's devname_r writes a NUL-terminated character-device name into the supplied buffer.
+    let name = unsafe { devname_r(dev as i32, 0o020000, buf.as_mut_ptr(), buf.len() as i32) };
+    if name.is_null() { return None; }
+    Some(format!("/dev/{}", unsafe { CStr::from_ptr(name) }.to_str().ok()?))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tty_path(field: &str) -> Option<String> { Some(format!("/dev/{field}")) }
+
 fn processes() -> (Procs, bool) {
-    let out = Command::new("ps").args(["-axo", "pid=,ppid=,tty=,comm="]).output().map(|o| o.stdout).unwrap_or_default();
+    let out = Command::new("ps").args(["-axo", PS_FIELDS]).output().map(|o| o.stdout).unwrap_or_default();
     let (mut procs, mut codex) = (Procs::new(), false);
     for line in String::from_utf8_lossy(&out).lines() {
         // three padded columns, then the command, which may contain spaces
@@ -107,7 +130,7 @@ fn processes() -> (Procs, bool) {
         let (Ok(pid), Ok(ppid), tty) = (next().parse::<u64>(), next().parse::<u64>(), next()) else { continue };
         let comm = rest.trim();
         codex |= project(comm).starts_with("codex");
-        procs.insert(pid, ((tty != "??").then(|| format!("/dev/{tty}")), ppid, comm.to_string()));
+        procs.insert(pid, ((!matches!(tty, "??" | "?")).then(|| tty.to_owned()), ppid, comm.to_string()));
     }
     (procs, codex)
 }
@@ -311,7 +334,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
             title,
             cwd,
             repo: String::new(),
-            tty: procs[&pid].0.clone(),
+            tty: procs[&pid].0.as_deref().and_then(tty_path),
             app: app_of(pid, procs),
             status: meta["status"].as_str().unwrap_or("?").to_string(),
             idle_secs: now().saturating_sub(updated_ms / 1000),
@@ -424,7 +447,7 @@ fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
 /// so open rollouts == live sessions. Closed sessions disappear immediately.
 /// Open rollout files with the pid holding each; the pid gives the session's terminal (tty).
 fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
-    let Ok(out) = Command::new("lsof").args(["-c", "codex", "-Fpn"]).output() else { return vec![] };
+    let Ok(out) = Command::new("lsof").args(["-nP", "-c", "codex", "-Fpn"]).output() else { return vec![] };
     let mut pid = 0;
     let mut open = vec![];
     for l in String::from_utf8_lossy(&out.stdout).lines() {
@@ -449,12 +472,6 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
     let mut paths: Vec<&PathBuf> = open.iter().map(|(p, _)| p).collect();
     paths.dedup(); // `open` is sorted, so one entry per file even if several processes hold it
     for path in paths {
-        // the holder with a terminal is the CLI (the desktop app's server has none); its tty lets
-        // click-to-jump find the exact Ghostty tab, wherever the session's folder is
-        // the holder with a terminal is the CLI; it also tells us which app the session is shown in
-        let holder = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| Some((*pid, procs.get(pid)?.0.clone()?)));
-        let app = holder.as_ref().and_then(|(pid, _)| app_of(*pid, procs));
-        let tty = holder.map(|(_, tty)| tty);
         let mtime = fs::metadata(path).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
         let entry = &mut cache["t"][path.to_string_lossy().as_ref()];
@@ -470,6 +487,12 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
         if meta["source"]["subagent"].is_object() || meta["source"] == "exec" {
             continue;
         }
+        // Prefer the CLI with a terminal when multiple processes hold the same rollout.
+        let holder = open.iter().filter(|(p, _)| p == path).find_map(|(_, pid)| {
+            Some((*pid, tty_path(procs.get(pid)?.0.as_deref()?)?))
+        });
+        let app = holder.as_ref().and_then(|(pid, _)| app_of(*pid, procs));
+        let tty = holder.map(|(_, tty)| tty);
         let id = meta["id"].as_str().unwrap_or_default().to_string();
         let title = titles.get(&id).cloned().unwrap_or_else(|| "?".to_string());
         out.push(Session {
@@ -825,7 +848,15 @@ mod tests {
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
         let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1)];
         let p = |tty: Option<&str>| (tty.map(String::from), 0, String::new());
-        let procs = Procs::from([(me as u64, p(None)), (1, p(None)), (2, p(Some("/dev/ttys042")))]);
+        #[cfg(target_os = "macos")]
+        let terminal = {
+            use std::os::unix::fs::MetadataExt;
+            let dev = fs::metadata("/dev/null").unwrap().rdev();
+            format!("{}/{}", dev >> 24, dev & 0xffffff)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let terminal = "null".to_string();
+        let procs = Procs::from([(me as u64, p(None)), (1, p(None)), (2, p(Some(&terminal)))]);
         let s = collect(&home, &open, &procs);
         // second run parses only the appended line, and keeps what the cache already knew
         let t = home.join(".claude/projects/-x-proj/abc.jsonl");
@@ -860,6 +891,6 @@ mod tests {
         assert_eq!(c.repo, "proj", "non-git folder falls back to its name");
         assert_eq!(s.iter().find(|s| s.id == "fresh").unwrap().cwd, "/x/worktrees/proj", "Claude: folder from the transcript, not the registry");
         assert_eq!(x.cwd, "/y/worktrees/api", "Codex: folder from the latest turn");
-        assert_eq!(x.tty.as_deref(), Some("/dev/ttys042"), "Codex: tty of the process holding its rollout");
+        assert_eq!(x.tty.as_deref(), Some("/dev/null"), "Codex: tty of the process holding its rollout");
     }
 }
