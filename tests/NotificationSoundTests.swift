@@ -34,7 +34,7 @@ final class NSSound {
         for needs in [false, true] {
             store.update([session("busy")])
             store.update([session("idle", needs: needs)])
-            assert(store.finished == session("idle", needs: needs))
+            assert(store.toasts.last?.session == session("idle", needs: needs))
         }
         assert(NSSound.played == ["Tink", "Glass"])
 

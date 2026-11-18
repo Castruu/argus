@@ -1,5 +1,5 @@
 //! ccs: list active Claude Code and Codex sessions.
-//! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh]
+//! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh] | ccs --doctor
 mod cache;
 mod limits;
 mod pr;
@@ -52,6 +52,9 @@ fn main() {
         if flag == "--fetch-pr" {
             return fetch_pr(cwd, Path::new(out), url.first().map(String::as_str));
         }
+    }
+    if args.iter().any(|a| a == "--doctor") {
+        return doctor(&home());
     }
     let as_json = args.iter().any(|a| a == "--json");
     let watch = args.iter().any(|a| a == "--watch" || a == "-w");
@@ -264,8 +267,53 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
         if cache::prepare(home).and_then(|_| cache::write_new(&tmp, &cache.to_string())).is_ok() {
             fs::rename(&tmp, &cache_path).ok();
         }
+        prune_cache(&home.join(".cache/ccs"), &out);
     }
     out
+}
+
+/// Removes what closed sessions left in the cache folder: per-session summaries and stamps, PR lookups
+/// and temp files that no live session owns and nothing has touched for a day.
+fn prune_cache(dir: &Path, live: &[Session]) {
+    for f in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = f.file_name().to_string_lossy().to_string();
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
+        // session ids are 36-character UUIDs; everything else here (limits, usage, cache.json) is shared
+        let per_session = (stem.len() == 36 && ["txt", "stamp"].contains(&ext)) || (stem.starts_with("pr") && ext == "json") || ext == "tmp";
+        let old = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > STALE_SECS);
+        if per_session && old && !live.iter().any(|s| s.id == stem) {
+            fs::remove_file(f.path()).ok();
+        }
+    }
+}
+
+/// launchd starts the overlay without Homebrew on PATH
+const GH: [&str; 3] = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+
+/// `ccs --doctor`: what is set up and what is missing, with the fix for each. Exits 1 if anything is missing.
+fn doctor(home: &Path) {
+    let runs = |bin: &str, args: &[&str]| Command::new(bin).args(args)
+        .stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let hook = |file: &str| fs::read_to_string(home.join(file)).unwrap_or_default().contains("summarize.sh");
+    let checks = [
+        ("Claude Code or Codex sessions", home.join(".claude/sessions").is_dir() || home.join(".codex/sessions").is_dir(),
+            "none found; start a session"),
+        ("jq", runs("jq", &["--version"]), "brew install jq (the hooks need it)"),
+        ("GitHub CLI", GH.iter().any(|gh| runs(gh, &["--version"])), "brew install gh (for PR and CI status)"),
+        ("GitHub CLI logged in", GH.iter().any(|gh| runs(gh, &["auth", "status"])), "gh auth login"),
+        ("summary hook", hook(".claude/settings.json") || hook(".codex/hooks.json"), "optional; see README: Optional setup"),
+        ("usage limits", !limits::read(home).is_empty(), "open the notch once, or run ccs --limits --refresh"),
+        ("overlay running", processes().0.values().any(|(_, _, comm)| project(comm) == "notch"),
+            "open CC Sessions Viewer, or run ./install.sh"),
+    ];
+    for (name, ok, fix) in &checks {
+        println!("{}", if *ok { format!("ok       {name}") } else { format!("MISSING  {name}: {fix}") });
+    }
+    println!("note     click-to-open needs Automation permission for the viewer (System Settings > Privacy & Security > Automation)");
+    if checks.iter().any(|c| !c.1) {
+        std::process::exit(1);
+    }
 }
 
 fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = Value> {
@@ -383,8 +431,7 @@ fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
 /// `ccs --fetch-pr <cwd> <out> [url]`: asks `gh` for that PR (or the current branch's) and writes it (or null) to <out>.
 fn fetch_pr(cwd: &str, out: &Path, url: Option<&str>) {
     if url.is_some_and(|u| pr::number(u, &home()).is_none()) { return; }
-    // launchd starts the overlay without Homebrew on PATH
-    let pr = ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"].iter()
+    let pr = GH.iter()
         .find_map(|gh| Command::new(gh).current_dir(cwd)
             .args(["pr", "view"]).args(url).args(["--json", "number,state,isDraft,url,statusCheckRollup"]).output().ok())
         .filter(|o| o.status.success())
@@ -819,6 +866,12 @@ mod tests {
         w(".codex/session_index.jsonl", r#"{"id":"cx1","thread_name":"API tests"}"#);
         w(".cache/ccs/abc.txt", "Fixing the login bug\n");
         w(".cache/ccs/fresh.txt", "DONE: Tests pass\n");
+        // left a long time ago: a closed session's summary (pruned) and a shared stamp (kept)
+        let closed = format!(".cache/ccs/{}.txt", "c".repeat(36));
+        for old in [closed.as_str(), ".cache/ccs/usage.stamp"] {
+            w(old, "old\n");
+            fs::File::options().write(true).open(home.join(old)).unwrap().set_modified(UNIX_EPOCH).unwrap();
+        }
         w(".cache/ccs/cx1.txt", "Adding API tests\n");
 
         let rollouts = home.join(".codex/sessions/2026/01/01");
@@ -837,7 +890,9 @@ mod tests {
         let codex_path = rollouts.join("rollout-1.jsonl");
         assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
             "keep the Codex transcript offset between refresh processes");
+        let (pruned, kept) = (!home.join(&closed).exists(), home.join(".cache/ccs/usage.stamp").exists());
         fs::remove_dir_all(&home).ok();
+        assert!(pruned && kept, "old files of closed sessions are pruned, shared files stay");
         assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
         assert!(c.stale && !c.needs, "an old question is stale, not needs-you");
