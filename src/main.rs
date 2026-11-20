@@ -17,6 +17,7 @@ use std::{
 
 struct Session {
     tool: &'static str,
+    profile: Option<String>, // Claude config dir the session runs under: "default" for ~/.claude, else the dir's name
     id: String,
     title: String,
     cwd: String,
@@ -339,6 +340,9 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
         out.push(Session {
             tool: "claude",
+            profile: Some(if config == &dirs[0] { "default".into() } else {
+                config.file_name().map_or("?".into(), |n| n.to_string_lossy().into_owned())
+            }),
             id,
             title,
             cwd,
@@ -506,6 +510,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
         let title = titles.get(&id).cloned().unwrap_or_else(|| "?".to_string());
         out.push(Session {
             tool: "codex",
+            profile: None,
             id,
             title,
             cwd: entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string(),
@@ -529,7 +534,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
 
 fn to_json(sessions: &[Session]) -> Value {
     let arr: Vec<Value> = sessions.iter().map(|s| json!({
-        "tool": s.tool, "id": s.id, "title": s.title, "cwd": s.cwd,
+        "tool": s.tool, "profile": s.profile, "id": s.id, "title": s.title, "cwd": s.cwd,
         "project": project(&s.cwd), "repo": s.repo, "tty": s.tty, "app": s.app, "status": s.status, "idle_secs": s.idle_secs,
         "last_prompt": s.last_prompt, "summary": s.summary,
         "waiting_for": s.waiting_for, "needs": s.needs, "stale": s.stale, "branch": s.branch, "dirty": s.dirty, "pr": s.pr,
@@ -884,7 +889,10 @@ mod tests {
             "keep the Codex transcript offset between refresh processes");
         fs::remove_dir_all(&home).ok();
         assert_eq!(s.len(), 4, "dead pids, closed codex sessions and headless runs must be skipped");
-        assert_eq!(s.iter().find(|s| s.id == "other").unwrap().title, "Elsewhere", "listed config dirs are scanned with their transcripts");
+        let other = s.iter().find(|s| s.id == "other").unwrap();
+        assert_eq!(other.title, "Elsewhere", "listed config dirs are scanned with their transcripts");
+        let profile = |id: &str| s.iter().find(|s| s.id == id).unwrap().profile.as_deref();
+        assert_eq!((profile("abc"), profile("other"), profile("cx1")), (Some("default"), Some("other-home"), None));
         let c = s.iter().find(|s| s.id == "abc").unwrap();
         assert!(c.stale && !c.needs, "an old question is stale, not needs-you");
         assert_eq!((c.pr["number"].as_u64(), c.pr["url"].as_str()), (Some(7), Some("https://github.com/o/r/pull/7")),

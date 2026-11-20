@@ -13,6 +13,13 @@ struct Session: Decodable, Identifiable, Equatable {
     var pr: PR?
     var pr_open_url: String? // supplied by ccs after host, path and PR number validation
     var app: String? // bundle of the terminal or editor the session runs in
+    var profile: String? // Claude config dir: "default" for ~/.claude, else the dir's name; nil for Codex
+}
+
+/// Sessions of one Claude profile. Codex has no profiles, so its sessions always show;
+/// a profile with no session left (or none picked) shows everything.
+func sessions(_ all: [Session], inProfile id: String) -> [Session] {
+    all.contains { $0.profile == id } ? all.filter { $0.profile == nil || $0.profile == id } : all
 }
 
 struct PR: Decodable, Equatable { let number: Int; let state: String?; let ci: String?; var draft: Bool? }
@@ -325,20 +332,24 @@ struct NotchView: View {
     @State var open = false
     @State private var hoveringPanel = false
     @AppStorage("palette") private var paletteID = "cool"
+    @AppStorage("profile") private var profileID = "" // "" = all profiles
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
+    /// The open panel lists the picked profile; the closed notch and the chimes keep covering every session.
+    var shown: [Session] { sessions(store.sessions, inProfile: profileID) }
 
     var body: some View {
         let shape = UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10)
         VStack(alignment: .leading, spacing: 10) {
             if open {
                 Spacer().frame(height: notch.height - 6)
-                let repos = groups(store.sessions)
+                let repos = groups(shown)
                 let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
+                profilePicker
                 header.frame(width: contentWidth)
-                if store.sessions.isEmpty {
+                if shown.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
                 // ccs output is already sorted by repo, so consecutive grouping keeps that order
@@ -418,6 +429,28 @@ struct NotchView: View {
             paletteMenu
             soundToggle
         }.font(.system(size: 11, weight: .semibold))
+    }
+
+    /// One chip per Claude profile when sessions run under more than one; the pick is remembered.
+    @ViewBuilder var profilePicker: some View {
+        let profiles = Set(store.sessions.compactMap(\.profile)).sorted()
+        if profiles.count > 1 {
+            let picked = profiles.contains(profileID) ? profileID : ""
+            HStack(spacing: 2) {
+                ForEach([""] + profiles, id: \.self) { id in
+                    Button { profileID = id } label: {
+                        Text(id.isEmpty ? "all" : id)
+                            .foregroundStyle(.white.opacity(id == picked ? 1 : 0.5))
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .background(Capsule().fill(.white.opacity(id == picked ? 0.18 : 0)))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(id == picked ? .isSelected : [])
+                    .modifier(Clickable())
+                }
+            }.font(.system(size: 11, weight: .semibold))
+        }
     }
 
     var limitsFooter: some View {
@@ -517,7 +550,7 @@ struct NotchView: View {
     }
 
     @ViewBuilder func count(_ label: String, _ color: Color, _ match: (Session) -> Bool) -> some View {
-        let n = store.sessions.filter(match).count
+        let n = shown.filter(match).count
         if n > 0 {
             HStack(spacing: 4) {
                 Circle().fill(color).frame(width: 6, height: 6)

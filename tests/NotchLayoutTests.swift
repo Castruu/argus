@@ -1,5 +1,20 @@
 import SwiftUI
 
+@MainActor func checkProfiles() {
+    func s(_ id: String, _ tool: String, _ profile: String?) -> Session {
+        var s = Session(tool: tool, id: id, title: id, project: "r", repo: "r", cwd: "", status: "idle", last_prompt: "", idle_secs: 1, summary: nil, tty: nil)
+        s.profile = profile
+        return s
+    }
+    let all = [s("a", "claude", "default"), s("b", "claude", "work"), s("c", "codex", nil)]
+    assert(sessions(all, inProfile: "work").map(\.id) == ["b", "c"], "A profile shows its Claude sessions and every Codex session")
+    assert(sessions(all, inProfile: "").count == 3 && sessions(all, inProfile: "gone").count == 3, "No pick, or a profile without sessions, shows all")
+    let picker = { (list: [Session]) in
+        ImageRenderer(content: NotchView(store: Store(sample: list), notch: CGSize(width: 190, height: 32), open: true)).nsImage!.size.height
+    }
+    assert(picker(all) > picker(Array(all.dropFirst())), "The profile picker appears only with more than one profile")
+}
+
 @main struct NotchLayoutTests {
     @MainActor static func main() {
         for tool in ["claude", "codex", "other"] {
@@ -54,6 +69,7 @@ import SwiftUI
             }
             assert(CGFloat(usage.top) >= withoutLimits.size.height - 4, "Limits should appear below the sessions")
         }
+        checkProfiles()
         checkFolderScrolling()
         print("Notch layout tests passed")
     }
