@@ -1,0 +1,25 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
+      - run: python3 tests/SummaryHookTests.py
+      - name: Editor window tests
+        run: |
+          swiftc -parse-as-library notch/EditorWindow.swift tests/EditorWindowTests.swift -o /tmp/ccs-editor-tests
+          /tmp/ccs-editor-tests
+      # SummaryPreviewTests opens real panels and needs a display, so it stays a local check
+      - name: Overlay tests
+        run: |
+          for t in NotificationSound NotchLayout UsageRefresh Pin; do
+            swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift "tests/${t}Tests.swift" -o "/tmp/ccs-$t"
+            "/tmp/ccs-$t"
+          done
+      - run: ./build.sh

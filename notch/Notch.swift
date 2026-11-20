@@ -1,5 +1,6 @@
 // Notch overlay: hover the notch to see active Claude Code / Codex sessions (data from `ccs --json`).
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 struct Session: Decodable, Identifiable, Equatable {
@@ -113,12 +114,42 @@ func editorWindow(support: String, containing cwd: String) -> String? {
     return editorWindow(state: state, containing: cwd)
 }
 
+/// `--quiet`: no chimes for this run. The speaker icon in the panel header mutes them for good.
+let quiet = CommandLine.arguments.contains("--quiet")
+
+/// Called when a click could not bring a session forward; the Store shows it as a toast.
+nonisolated(unsafe) var focusFailed: () -> Void = {}
+
+nonisolated(unsafe) var hotKeyActions: [UInt32: () -> Void] = [:] // by key code
+
+/// Registers a system-wide shortcut. Carbon hot keys need no Accessibility permission.
+@discardableResult func hotKey(_ key: Int, _ modifiers: Int, _ run: @escaping () -> Void) -> EventHotKeyRef? {
+    if hotKeyActions.isEmpty {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var id = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &id)
+            hotKeyActions[id.id]?()
+            return noErr
+        }, 1, &spec, nil, nil)
+    }
+    var ref: EventHotKeyRef?
+    let status = RegisterEventHotKey(UInt32(key), UInt32(modifiers), EventHotKeyID(signature: OSType(0x63637376), id: UInt32(key)),
+                                     GetApplicationEventTarget(), 0, &ref)
+    if status != noErr { FileHandle.standardError.write(Data("shortcut not registered (key \(key), status \(status)): another app may hold it\n".utf8)) }
+    hotKeyActions[UInt32(key)] = run
+    return ref
+}
+
 /// Brings the session forward in whatever app runs it.
 func focus(_ s: Session) {
     func script(_ file: String) { // these find the exact tab by tty (or working directory)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = [scriptDir.appendingPathComponent(file).path, s.tty ?? "", s.cwd]
+        // fails when macOS has not been allowed to let us control the terminal
+        p.terminationHandler = { p in if p.terminationStatus != 0 { DispatchQueue.main.async { focusFailed() } } }
         try? p.run()
     }
     guard let app = s.app.map({ URL(fileURLWithPath: $0) }) else {
@@ -140,13 +171,26 @@ func focus(_ s: Session) {
     }
 }
 
+/// A line shown for a few seconds under the notch: a session that finished or needs you, or a problem.
+struct Toast: Identifiable {
+    let id = UUID()
+    var session: Session?
+    var text = ""
+}
+
 final class Store: ObservableObject {
     @Published var sessions: [Session] = []
-    @Published var finished: Session? // last session whose turn just ended, shown briefly under the notch
+    @Published var toasts: [Toast] = []
     @Published var limits: [ToolLimits] = []
+    /// Held open by the keyboard shortcut, whatever the mouse does. Escape, a click outside the panel,
+    /// opening a session or the shortcut again lets go.
+    @Published var pinned = false { didSet { if pinned != oldValue { watchForDismiss(pinned) } } }
+    var escKey: EventHotKeyRef?, outsideClicks: Any?
+    var lastJump = ""
+    var lastEvent = Date.distantPast, eventPending = false
     var loaded = false
     var tick = 0
-    /// Panel is open. Closed, we poll half as often to save CPU; opening refreshes at once.
+    /// Panel is open. Closed, the timer refreshes every 30 s instead of every 2; opening refreshes at once.
     var open = false { didSet { if open && !oldValue { refresh(fetchLimits: true) } } }
     var running = false, again = false
     var fetchLimitsPending = false
@@ -156,9 +200,12 @@ final class Store: ObservableObject {
     let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
         ?? binDir.appendingPathComponent("ccs").path
 
-    init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished; repoNames = Set(sample.map(\.repo)).sorted() }
+    init(sample: [Session], toasts: [Toast] = []) { sessions = sample; self.toasts = toasts; repoNames = Set(sample.map(\.repo)).sorted() }
 
     init() {
+        focusFailed = { [weak self] in
+            self?.toast(Toast(text: "Could not open that tab. Allow the viewer under Automation in System Settings (ccs --doctor)"))
+        }
         refresh()
         // File events drive updates: Claude rewrites a session file when its status changes, and the hooks
         // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
@@ -170,7 +217,7 @@ final class Store: ObservableObject {
             // ccs's own cache and the temp files are not news
             let paths = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
             guard paths.contains(where: { !$0.hasSuffix("cache.json") && !$0.hasSuffix(".tmp") && !$0.hasSuffix(".stamp") }) else { return }
-            Unmanaged<Store>.fromOpaque(info!).takeUnretainedValue().refresh()
+            Unmanaged<Store>.fromOpaque(info!).takeUnretainedValue().fileChanged()
         }, &ctx, dirs as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
             UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer))
         if let events {
@@ -195,6 +242,47 @@ final class Store: ObservableObject {
         for (center, name, value) in pause {
             center.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { [weak self] _ in self?.paused = value }
         }
+    }
+
+    /// File events refresh at most once a second: a streaming Codex session writes its rollout many times a second.
+    func fileChanged() {
+        let wait = 1 - Date().timeIntervalSince(lastEvent)
+        if wait <= 0 {
+            lastEvent = Date()
+            refresh()
+        } else if !eventPending {
+            eventPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { self.eventPending = false; self.fileChanged() }
+        }
+    }
+
+    /// While pinned: Escape (a hot key, so no Accessibility permission) and clicks in other apps unpin.
+    /// Clicks on the panel itself are not "outside", so the palette, scrolling and rows keep working.
+    func watchForDismiss(_ on: Bool) {
+        if on {
+            escKey = hotKey(kVK_Escape, 0) { [weak self] in self?.pinned = false }
+            outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in self?.pinned = false }
+        } else {
+            if let escKey { UnregisterEventHotKey(escKey) } // give Escape back to the other apps
+            if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
+            (escKey, outsideClicks) = (nil, nil)
+        }
+    }
+
+    func toast(_ t: Toast) {
+        withAnimation(.spring(duration: 0.3)) { toasts.append(t) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            withAnimation(.spring(duration: 0.3)) { self.toasts.removeAll { $0.id == t.id } }
+        }
+    }
+
+    /// Focus the next session that needs you; with none, show or hide the panel.
+    func jumpToNext() {
+        let waiting = sessions.filter { $0.needs == true }
+        guard !waiting.isEmpty else { pinned.toggle(); return }
+        let i = waiting.firstIndex { $0.id == lastJump }.map { ($0 + 1) % waiting.count } ?? 0
+        lastJump = waiting[i].id
+        focus(waiting[i])
     }
 
     func refresh(fetchLimits: Bool = false) {
@@ -225,16 +313,14 @@ final class Store: ObservableObject {
         (sessions, loaded) = (new, true)
         repoNames = Set(new.map(\.repo)).sorted()
         guard !first else { return } // no chimes for what was already there at launch
-        // "needs you" (Glass) wins over "finished" (Tink)
-        let asking = new.first { $0.needs == true && !wasNeeding.contains($0.id) }
-        guard let done = asking ?? new.first(where: { wasBusy.contains($0.id) && $0.status == "idle" }) else { return }
-        if !UserDefaults.standard.bool(forKey: "notificationSoundsMuted") {
-            NSSound(named: asking != nil ? "Glass" : "Tink")?.play()
+        // one toast per session; one chime for the lot, where "needs you" (Glass) wins over "finished" (Tink)
+        let asking = new.filter { $0.needs == true && !wasNeeding.contains($0.id) }
+        let done = new.filter { wasBusy.contains($0.id) && $0.status == "idle" && !asking.contains($0) }
+        guard !asking.isEmpty || !done.isEmpty else { return }
+        if !quiet && !UserDefaults.standard.bool(forKey: "notificationSoundsMuted") {
+            NSSound(named: asking.isEmpty ? "Tink" : "Glass")?.play()
         }
-        withAnimation(.spring(duration: 0.3)) { finished = done }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
-            if self.finished?.id == done.id { withAnimation(.spring(duration: 0.3)) { self.finished = nil } }
-        }
+        (asking + done).forEach { toast(Toast(session: $0)) }
     }
 }
 
@@ -301,16 +387,22 @@ struct NotchView: View {
                 if !store.limits.isEmpty {
                     limitsFooter.frame(width: contentWidth)
                 }
-            } else if let f = store.finished {
+            } else if !store.toasts.isEmpty {
                 Spacer().frame(height: notch.height)
-                HStack(spacing: 6) {
-                    Image(systemName: f.needs == true ? "bell.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(f.needs == true ? p.needs : p.repo(f.repo))
-                    Text("\(f.repo): \(f.title)\(f.needs == true ? " needs you" : "")").font(.system(size: 12, weight: .medium)).lineLimit(1)
-                }
-                .padding(.horizontal, 14).padding(.bottom, 8)
-                .modifier(Clickable())
-                .onTapGesture { focus(f) }
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(store.toasts) { t in
+                        let needs = t.session?.needs == true
+                        HStack(spacing: 6) {
+                            Image(systemName: t.session == nil ? "exclamationmark.triangle.fill" : needs ? "bell.fill" : "checkmark.circle.fill")
+                                .foregroundStyle(t.session.map { needs ? p.needs : p.repo($0.repo) } ?? p.failing)
+                            Text(t.session.map { "\($0.repo): \($0.title)\(needs ? " needs you" : "")" } ?? t.text)
+                                .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        }
+                        .padding(.horizontal, 14)
+                        .modifier(Clickable())
+                        .onTapGesture { if let s = t.session { focus(s) } }
+                    }
+                }.padding(.bottom, 8)
             } else {
                 // collapsed: one dot per busy session, sitting under the notch
                 HStack(spacing: 3) {
@@ -337,22 +429,30 @@ struct NotchView: View {
         .padding(.horizontal, open ? 18 : 0)
         .padding(.bottom, open ? 14 : 0)
         .fixedSize(horizontal: open, vertical: false) // open panel is as wide as its columns, not the screen
-        .frame(width: open || store.finished != nil ? nil : notch.width,
-               height: open || store.finished != nil ? nil : notch.height, alignment: .topLeading)
-        .frame(minWidth: open ? 300 : store.finished != nil ? notch.width : 0)
+        .frame(width: open || !store.toasts.isEmpty ? nil : notch.width,
+               height: open || !store.toasts.isEmpty ? nil : notch.height, alignment: .topLeading)
+        .frame(minWidth: open ? 300 : !store.toasts.isEmpty ? notch.width : 0)
         .background(shape.fill(.black))
         .clipShape(shape)
         .contentShape(Rectangle())
-        .onHover { h in hoveringPanel = h; setOpen(h || summaryPreview.isShown) }
-        .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || shown) }
+        .onHover { h in
+            hoveringPanel = h
+            // open after a short wait, so the mouse passing by on its way to the menu bar does not pop the panel
+            DispatchQueue.main.asyncAfter(deadline: .now() + (h ? 0.15 : 0)) {
+                if hoveringPanel == h { setOpen(h || summaryPreview.isShown || store.pinned) }
+            }
+        }
+        .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || shown || store.pinned) }
+        .onReceive(store.$pinned.dropFirst()) { setOpen($0 || hoveringPanel || summaryPreview.isShown, fast: true) }
         .onDisappear { summaryPreview.close() }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
     }
 
-    private func setOpen(_ value: Bool) {
+    /// `fast`: the keyboard shortcut should answer at once, not ease in like a hover.
+    private func setOpen(_ value: Bool, fast: Bool = false) {
         store.open = value
-        withAnimation(.spring(duration: 0.25)) { open = value }
+        withAnimation(fast ? .easeOut(duration: 0.08) : .spring(duration: 0.25)) { open = value }
     }
 
     var header: some View {
@@ -522,7 +622,7 @@ struct NotchView: View {
         .contentShape(Rectangle())
         .modifier(Clickable())
         .modifier(SummaryHoverCard(text: s.stale == true ? nil : s.summary ?? (s.last_prompt.isEmpty ? nil : "You: \(s.last_prompt)"), preview: summaryPreview))
-        .onTapGesture { summaryPreview.close(); focus(s) }
+        .onTapGesture { summaryPreview.close(); store.pinned = false; focus(s) }
     }
 }
 
@@ -567,7 +667,11 @@ struct NotchApp {
         // The overlay stays inactive while the user works in another app.
         panel.allowsToolTipsWhenApplicationIsInactive = true
         let preview = SummaryPreview()
-        let host = ClickThroughHost(rootView: NotchView(store: Store(), notch: pill, beside: beside, trailing: trailing,
+        let store = Store()
+        // global shortcuts: control-option-S shows or hides the panel, control-option-N jumps to the next session that needs you
+        hotKey(kVK_ANSI_S, controlKey | optionKey) { store.pinned.toggle() }
+        hotKey(kVK_ANSI_N, controlKey | optionKey) { store.jumpToNext() }
+        let host = ClickThroughHost(rootView: NotchView(store: store, notch: pill, beside: beside, trailing: trailing,
                                                        room: screen.frame.width - trailing - 16, summaryPreview: preview))
         preview.host = host
         panel.contentView = host
@@ -620,5 +724,5 @@ struct NotchApp {
         }
         save(sheet, "palettes.png", height: CGFloat(Palette.all.count) * 304)
     }
-    save(NotchView(store: Store(sample: sample, finished: sample[2]), notch: notch), "notch-finished.png", height: 78)
+    save(NotchView(store: Store(sample: sample, toasts: [Toast(session: sample[2]), Toast(session: sample[1])]), notch: notch), "notch-finished.png", height: 104)
 }
