@@ -106,6 +106,14 @@ swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/SummaryPreviewTests.
 /tmp/ccs-summary-preview-tests
 ```
 
+## Other Claude config directories
+
+Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude`. List those directories in `~/.config/ccs/claude-dirs`, one per line (`~/` is expanded); `~/.claude` is always scanned. Restart the notch after editing the list. Hooks go in each directory's own `settings.json`.
+
+```
+~/.moirai/homes/claude/personal
+```
+
 ## Session start and end hooks
 
 Merge these entries into the existing `hooks` object in `~/.codex/hooks.json` to update the notch on a normal exit or resume. Keep any handlers already registered for those events.

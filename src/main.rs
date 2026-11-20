@@ -298,11 +298,20 @@ fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = 
         .filter_map(|l| serde_json::from_str(&l).ok())
 }
 
+/// `~/.claude`, plus the other Claude config dirs (CLAUDE_CONFIG_DIR) listed one per line in ~/.config/ccs/claude-dirs.
+fn claude_dirs(home: &Path) -> Vec<PathBuf> {
+    let listed = fs::read_to_string(home.join(".config/ccs/claude-dirs")).unwrap_or_default();
+    let listed = listed.lines().map(str::trim).filter(|l| !l.is_empty())
+        .map(|l| l.strip_prefix("~/").map_or_else(|| PathBuf::from(l), |rest| home.join(rest)));
+    std::iter::once(home.join(".claude")).chain(listed).collect()
+}
+
 fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session> {
-    let Ok(dir) = fs::read_dir(home.join(".claude/sessions")) else { return vec![] };
+    let dirs = claude_dirs(home);
+    let files = dirs.iter().flat_map(|config|
+        fs::read_dir(config.join("sessions")).into_iter().flatten().flatten().map(move |e| (config, e.path())));
     let mut out = vec![];
-    for entry in dir.flatten() {
-        let path = entry.path();
+    for (config, path) in files {
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
@@ -315,7 +324,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         let id = meta["sessionId"].as_str().unwrap_or_default().to_string();
         let entry = &mut cache["t"][id.as_str()];
         if entry["path"].as_str().is_none_or(|p| !Path::new(p).exists()) {
-            if let Some(p) = find_claude_transcript(home, &id) {
+            if let Some(p) = find_claude_transcript(config, &id) {
                 *entry = json!({"path": p.to_string_lossy()});
             }
         }
@@ -436,8 +445,8 @@ fn ci_of(rollup: &Value) -> Option<&'static str> {
     })
 }
 
-fn find_claude_transcript(home: &Path, id: &str) -> Option<PathBuf> {
-    fs::read_dir(home.join(".claude/projects")).ok()?
+fn find_claude_transcript(config: &Path, id: &str) -> Option<PathBuf> {
+    fs::read_dir(config.join("projects")).ok()?
         .flatten()
         .map(|d| d.path().join(format!("{id}.jsonl")))
         .find(|p| p.exists())
@@ -833,6 +842,11 @@ mod tests {
             r#"{"type":"system","cwd":"/x/proj"}"#, "\n",
             r#"{"type":"system","cwd":"/x/worktrees/proj"}"#, "\n"));
 
+        // a session started with CLAUDE_CONFIG_DIR lives in its own config dir
+        w(".config/ccs/claude-dirs", "~/other-home\n");
+        w("other-home/sessions/5.json", &format!(r#"{{"pid":{me},"sessionId":"other","cwd":"/x/proj","status":"idle","updatedAt":0}}"#));
+        w("other-home/projects/-x-proj/other.jsonl", concat!(r#"{"type":"ai-title","aiTitle":"Elsewhere"}"#, "\n"));
+
         w(".codex/sessions/2026/01/01/rollout-1.jsonl", concat!(
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
             r#"{"type":"turn_context","payload":{"cwd":"/y/worktrees/api"}}"#, "\n",
@@ -869,7 +883,8 @@ mod tests {
         assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
             "keep the Codex transcript offset between refresh processes");
         fs::remove_dir_all(&home).ok();
-        assert_eq!(s.len(), 3, "dead pids, closed codex sessions and headless runs must be skipped");
+        assert_eq!(s.len(), 4, "dead pids, closed codex sessions and headless runs must be skipped");
+        assert_eq!(s.iter().find(|s| s.id == "other").unwrap().title, "Elsewhere", "listed config dirs are scanned with their transcripts");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
         assert!(c.stale && !c.needs, "an old question is stale, not needs-you");
         assert_eq!((c.pr["number"].as_u64(), c.pr["url"].as_str()), (Some(7), Some("https://github.com/o/r/pull/7")),

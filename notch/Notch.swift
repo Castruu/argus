@@ -203,7 +203,11 @@ final class Store: ObservableObject {
         // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"]
+        // other Claude config dirs (CLAUDE_CONFIG_DIR), the same list ccs scans
+        let listed = ((try? String(contentsOfFile: home + "/.config/ccs/claude-dirs", encoding: .utf8)) ?? "").split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .map { ($0 as NSString).expandingTildeInPath + "/sessions" }
+        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"] + listed
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in
             // ccs's own cache and the temp files are not news
