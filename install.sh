@@ -35,7 +35,12 @@ cat > "$plist" <<EOF
 EOF
 # stop the old one (if any), then start the new one
 launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$plist"
+# bootout returns before a running overlay is gone, and bootstrap fails until it is
+for try in 1 2 3 4 5; do
+  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null && break
+  [ "$try" = 5 ] && { echo "could not start the overlay; run: launchctl bootstrap gui/$(id -u) $plist" >&2; exit 1; }
+  sleep 1
+done
 
 cat <<EOF
 
