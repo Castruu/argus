@@ -333,7 +333,7 @@ struct NotchView: View {
     @State private var hoveringPanel = false
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("profile") private var profileID = "" // "" = all profiles
-    @State private var heldWidth: CGFloat = 0 // until the panel closes: picking a profile with fewer repos must not shrink it away from the pointer
+    @State private var pinned = false // a profile pick resized the panel away from the pointer: stay open until it is hovered again
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
@@ -347,7 +347,7 @@ struct NotchView: View {
             if open {
                 Spacer().frame(height: notch.height - 6)
                 let repos = groups(shown)
-                let contentWidth = max(width(repos.count), heldWidth)
+                let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
                 profilePicker
                 header.frame(width: contentWidth)
                 if shown.isEmpty {
@@ -408,8 +408,12 @@ struct NotchView: View {
         .background(shape.fill(.black))
         .clipShape(shape)
         .contentShape(Rectangle())
-        .onHover { h in hoveringPanel = h; setOpen(h || summaryPreview.isShown) }
-        .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || shown) }
+        .onHover { h in
+            hoveringPanel = h
+            if h { pinned = false }
+            setOpen(h || pinned || summaryPreview.isShown)
+        }
+        .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || pinned || shown) }
         .onDisappear { summaryPreview.close() }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: beside ? .topTrailing : .top)
         .padding(.trailing, beside ? trailing : 0)
@@ -417,7 +421,6 @@ struct NotchView: View {
 
     private func setOpen(_ value: Bool) {
         store.open = value
-        if !value { heldWidth = 0 }
         withAnimation(.spring(duration: 0.25)) { open = value }
     }
 
@@ -440,7 +443,12 @@ struct NotchView: View {
             let picked = profiles.contains(profileID) ? profileID : ""
             HStack(spacing: 2) {
                 ForEach([""] + profiles, id: \.self) { id in
-                    Button { heldWidth = max(heldWidth, width(groups(shown).count)); profileID = id } label: {
+                    Button {
+                        profileID = id
+                        pinned = true
+                        // still under the pointer once the panel has resized: nothing to hold open
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if hoveringPanel { pinned = false } }
+                    } label: {
                         Text(id.isEmpty ? "all" : id)
                             .foregroundStyle(.white.opacity(id == picked ? 1 : 0.5))
                             .padding(.horizontal, 8).padding(.vertical, 2)
@@ -512,7 +520,6 @@ struct NotchView: View {
     }
 
     let colW: CGFloat = 250
-    func width(_ repos: Int) -> CGFloat { max(264, min(room - 36, CGFloat(repos) * (colW + 18) - 18)) }
 
     func columns(_ gs: [(String, [Session])]) -> some View {
         HStack(alignment: .top, spacing: 18) {
