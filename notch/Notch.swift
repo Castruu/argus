@@ -334,6 +334,7 @@ struct NotchView: View {
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("profile") private var profileID = "" // "" = all profiles
     @State private var pinned = false // a profile pick resized the panel away from the pointer: stay open until it is hovered again
+    @State private var pinTimeout: DispatchWorkItem?
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
@@ -448,11 +449,13 @@ struct NotchView: View {
                         pinned = true
                         // still under the pointer once the panel has resized: nothing to hold open
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if hoveringPanel { pinned = false } }
-                        // never hovered again: close anyway
-                        // shortcut: a timer from an earlier pick can end a later pick's hold early, track the pick if that shows
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                        // never hovered again: close anyway, five seconds after the latest pick
+                        pinTimeout?.cancel()
+                        let timeout = DispatchWorkItem {
                             if pinned { pinned = false; setOpen(hoveringPanel || summaryPreview.isShown) }
                         }
+                        pinTimeout = timeout
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
                     } label: {
                         Text(id.isEmpty ? "all" : id)
                             .foregroundStyle(.white.opacity(id == picked ? 1 : 0.5))
