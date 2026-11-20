@@ -448,6 +448,11 @@ struct NotchView: View {
                         pinned = true
                         // still under the pointer once the panel has resized: nothing to hold open
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { if hoveringPanel { pinned = false } }
+                        // never hovered again: close anyway
+                        // shortcut: a timer from an earlier pick can end a later pick's hold early, track the pick if that shows
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                            if pinned { pinned = false; setOpen(hoveringPanel || summaryPreview.isShown) }
+                        }
                     } label: {
                         Text(id.isEmpty ? "all" : id)
                             .foregroundStyle(.white.opacity(id == picked ? 1 : 0.5))
