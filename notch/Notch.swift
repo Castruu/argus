@@ -335,6 +335,7 @@ struct NotchView: View {
     @AppStorage("profile") private var profileID = "" // "" = all profiles
     @State private var pinned = false // a profile pick resized the panel away from the pointer: stay open until it is hovered again
     @State private var pinTimeout: DispatchWorkItem?
+    @State private var closedAt = Date.distantPast // when the panel last started closing
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
@@ -412,6 +413,12 @@ struct NotchView: View {
         .onHover { h in
             hoveringPanel = h
             if h { pinned = false }
+            // the closing panel still catches the pointer over its shrinking area: reopen only if still hovered once it has closed
+            let settling = 0.4 - Date().timeIntervalSince(closedAt)
+            if h && !open && settling > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + settling) { if hoveringPanel { setOpen(true) } }
+                return
+            }
             setOpen(h || pinned || summaryPreview.isShown)
         }
         .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || pinned || shown) }
@@ -421,6 +428,7 @@ struct NotchView: View {
     }
 
     private func setOpen(_ value: Bool) {
+        if open && !value { closedAt = Date() }
         store.open = value
         withAnimation(.spring(duration: 0.25)) { open = value }
     }
