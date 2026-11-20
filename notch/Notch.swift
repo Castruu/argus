@@ -333,6 +333,7 @@ struct NotchView: View {
     @State private var hoveringPanel = false
     @AppStorage("palette") private var paletteID = "cool"
     @AppStorage("profile") private var profileID = "" // "" = all profiles
+    @State private var heldWidth: CGFloat = 0 // until the panel closes: picking a profile with fewer repos must not shrink it away from the pointer
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
@@ -346,7 +347,7 @@ struct NotchView: View {
             if open {
                 Spacer().frame(height: notch.height - 6)
                 let repos = groups(shown)
-                let contentWidth = max(264, min(room - 36, CGFloat(repos.count) * (colW + 18) - 18))
+                let contentWidth = max(width(repos.count), heldWidth)
                 profilePicker
                 header.frame(width: contentWidth)
                 if shown.isEmpty {
@@ -416,6 +417,7 @@ struct NotchView: View {
 
     private func setOpen(_ value: Bool) {
         store.open = value
+        if !value { heldWidth = 0 }
         withAnimation(.spring(duration: 0.25)) { open = value }
     }
 
@@ -438,7 +440,7 @@ struct NotchView: View {
             let picked = profiles.contains(profileID) ? profileID : ""
             HStack(spacing: 2) {
                 ForEach([""] + profiles, id: \.self) { id in
-                    Button { profileID = id } label: {
+                    Button { heldWidth = max(heldWidth, width(groups(shown).count)); profileID = id } label: {
                         Text(id.isEmpty ? "all" : id)
                             .foregroundStyle(.white.opacity(id == picked ? 1 : 0.5))
                             .padding(.horizontal, 8).padding(.vertical, 2)
@@ -510,6 +512,7 @@ struct NotchView: View {
     }
 
     let colW: CGFloat = 250
+    func width(_ repos: Int) -> CGFloat { max(264, min(room - 36, CGFloat(repos) * (colW + 18) - 18)) }
 
     func columns(_ gs: [(String, [Session])]) -> some View {
         HStack(alignment: .top, spacing: 18) {
