@@ -335,7 +335,6 @@ struct NotchView: View {
     @AppStorage("profile") private var profileID = "" // "" = all profiles
     @State private var pinned = false // a profile pick resized the panel away from the pointer: stay open until it is hovered again
     @State private var pinTimeout: DispatchWorkItem?
-    @State private var closedAt = Date.distantPast // when the panel last started closing
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
@@ -410,15 +409,13 @@ struct NotchView: View {
         .background(shape.fill(.black))
         .clipShape(shape)
         .contentShape(Rectangle())
-        .onHover { h in
+        .onContinuousHover { phase in
+            // a closed panel keeps reporting hover over the area it had while open: only the notch itself opens it
+            var h = false
+            if case .active = phase { h = open || store.finished != nil || pointerOnNotch }
+            guard h != hoveringPanel else { return }
             hoveringPanel = h
             if h { pinned = false }
-            // the closing panel still catches the pointer over its shrinking area: reopen only if still hovered once it has closed
-            let settling = 0.4 - Date().timeIntervalSince(closedAt)
-            if h && !open && settling > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + settling) { if hoveringPanel { setOpen(true) } }
-                return
-            }
             setOpen(h || pinned || summaryPreview.isShown)
         }
         .onChange(of: summaryPreview.isShown) { _, shown in setOpen(hoveringPanel || pinned || shown) }
@@ -427,8 +424,17 @@ struct NotchView: View {
         .padding(.trailing, beside ? trailing : 0)
     }
 
+    /// Whether the pointer is over the closed notch, from the real pointer position rather than SwiftUI's hover area.
+    /// shortcut: a finished banner is wider than the notch and is not measured, so hover is not gated while one shows; measure the banner if that bothers.
+    private var pointerOnNotch: Bool {
+        guard let f = summaryPreview.host?.window?.frame else { return true }
+        let x = beside ? f.maxX - trailing - notch.width : f.midX - notch.width / 2
+        // 1pt of slack: the pointer can report exactly the screen's top edge
+        return CGRect(x: x, y: f.maxY - notch.height, width: notch.width, height: notch.height)
+            .insetBy(dx: -1, dy: -1).contains(NSEvent.mouseLocation)
+    }
+
     private func setOpen(_ value: Bool) {
-        if open && !value { closedAt = Date() }
         store.open = value
         withAnimation(.spring(duration: 0.25)) { open = value }
     }
