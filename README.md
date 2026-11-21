@@ -110,7 +110,7 @@ swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/SummaryPreviewTests.
 
 Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude`. List those directories in `~/.config/ccs/claude-dirs`, one per line (`~/` is expanded); `~/.claude` is always scanned. Restart the notch after editing the list. Hooks go in each directory's own `settings.json`.
 
-Each directory is a profile, named after its folder (`default` for `~/.claude`). When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions (Codex sessions always show), or `all`. The pick is remembered. The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
+Each directory is a profile, named after its folder (`default` for `~/.claude`). When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions (Codex sessions always show), or `all`. The pick is remembered. The usage footer shows the picked profile's Claude limits, or the default profile's while `all` is picked. The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
 
 ```
 ~/.moirai/homes/claude/personal
@@ -159,7 +159,7 @@ Check both summary hooks without calling a model with `python3 tests/SummaryHook
 
 ## Keeping limits current
 
-Opening the notch fetches current Claude and Codex usage concurrently. Claude uses its existing login from macOS Keychain or `~/.claude/.credentials.json`; Codex uses the ChatGPT login in `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). API-key logins have no subscription quota to fetch. Each request has a five-second timeout and keeps credentials in memory. Existing logins are never renewed or rewritten.
+Opening the notch fetches current Claude and Codex usage concurrently. Claude uses its existing login from macOS Keychain or `~/.claude/.credentials.json`; Codex uses the ChatGPT login in `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). Each profile is fetched with its own login: `.credentials.json` in its config directory, or the Keychain item Claude Code created for that directory (list the directory spelled as in `CLAUDE_CONFIG_DIR`; macOS asks once per login). API-key logins have no subscription quota to fetch. Each request has a five-second timeout and keeps credentials in memory. Existing logins are never renewed or rewritten.
 
 `ccs --limits --refresh` does the same in the terminal. Ordinary refreshes only read local caches; newer Codex session usage events override older API samples, and reset windows remain visible at 0%. A failed fetch keeps the last available values for that provider.
 
@@ -169,7 +169,7 @@ The status-line hook is optional. To also update the cache as you use Claude Cod
 "statusLine": { "type": "command", "command": "/ABSOLUTE/PATH/cc-sessions-viewer/hooks/statusline.sh" }
 ```
 
-It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json`. `ccs --limits` uses the newest sample for each window.
+It prints a short line (model, usage, context) and saves the limits to `~/.cache/ccs/claude-limits.json` (`claude-limits-<folder>.json` for another config directory). `ccs --limits` uses the newest sample for each window.
 
 ## Running next to another notch app
 

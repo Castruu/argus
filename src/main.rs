@@ -299,20 +299,22 @@ fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = 
         .filter_map(|l| serde_json::from_str(&l).ok())
 }
 
-/// `~/.claude`, plus the other Claude config dirs (CLAUDE_CONFIG_DIR) listed one per line in ~/.config/ccs/claude-dirs.
-fn claude_dirs(home: &Path) -> Vec<PathBuf> {
+/// Claude profiles as (name, config dir). "default" is `~/.claude` and comes first; the rest are the config dirs
+/// (CLAUDE_CONFIG_DIR) listed one per line in ~/.config/ccs/claude-dirs, named after their folder.
+fn claude_profiles(home: &Path) -> Vec<(String, PathBuf)> {
     let listed = fs::read_to_string(home.join(".config/ccs/claude-dirs")).unwrap_or_default();
     let listed = listed.lines().map(str::trim).filter(|l| !l.is_empty())
-        .map(|l| l.strip_prefix("~/").map_or_else(|| PathBuf::from(l), |rest| home.join(rest)));
-    std::iter::once(home.join(".claude")).chain(listed).collect()
+        .map(|l| l.strip_prefix("~/").map_or_else(|| PathBuf::from(l), |rest| home.join(rest)))
+        .map(|dir| (dir.file_name().map_or("?".into(), |n| n.to_string_lossy().into_owned()), dir));
+    std::iter::once(("default".to_string(), home.join(".claude"))).chain(listed).collect()
 }
 
 fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session> {
-    let dirs = claude_dirs(home);
-    let files = dirs.iter().flat_map(|config|
-        fs::read_dir(config.join("sessions")).into_iter().flatten().flatten().map(move |e| (config, e.path())));
+    let profiles = claude_profiles(home);
+    let files = profiles.iter().flat_map(|(profile, config)|
+        fs::read_dir(config.join("sessions")).into_iter().flatten().flatten().map(move |e| (profile, config, e.path())));
     let mut out = vec![];
-    for (config, path) in files {
+    for (profile, config, path) in files {
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
@@ -340,9 +342,7 @@ fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session
         let updated_ms = meta["statusUpdatedAt"].as_u64().or(meta["updatedAt"].as_u64()).unwrap_or(0);
         out.push(Session {
             tool: "claude",
-            profile: Some(if config == &dirs[0] { "default".into() } else {
-                config.file_name().map_or("?".into(), |n| n.to_string_lossy().into_owned())
-            }),
+            profile: Some(profile.clone()),
             id,
             title,
             cwd,

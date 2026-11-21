@@ -16,29 +16,53 @@ pub struct Window {
     pub resets_at: Option<u64>,
 }
 
-/// `[(tool, windows)]` for each tool that has cached limits.
-pub fn read(home: &Path) -> Vec<(&'static str, Vec<Window>)> {
-    [("Claude", claude(home)), ("Codex", codex(home))].into_iter().filter(|(_, w)| !w.is_empty()).collect()
+/// (tool, windows, Claude profile): each Claude profile is its own login with its own limits.
+pub type Limits = (&'static str, Vec<Window>, Option<String>);
+
+/// One entry per Claude profile and one for Codex, skipping those without cached limits.
+pub fn read(home: &Path) -> Vec<Limits> {
+    crate::claude_profiles(home).into_iter().map(|(name, dir)| ("Claude", claude(home, &name, &dir), Some(name)))
+        .chain([("Codex", codex(home), None)])
+        .filter(|(_, w, _)| !w.is_empty()).collect()
+}
+
+/// "Claude" for the default profile and Codex, "Claude work" for another profile.
+fn tool_label(tool: &str, profile: Option<&str>) -> String {
+    match profile {
+        Some(p) if p != "default" => format!("{tool} {p}"),
+        _ => tool.to_string(),
+    }
+}
+
+/// A profile's Claude Code state file and our usage cache. `~/.claude` keeps its state beside it, in `~/.claude.json`.
+fn claude_files(home: &Path, name: &str, dir: &Path) -> (PathBuf, PathBuf) {
+    if dir == home.join(".claude") {
+        (home.join(".claude.json"), home.join(".cache/ccs/claude-limits.json"))
+    } else {
+        (dir.join(".claude.json"), home.join(format!(".cache/ccs/claude-limits-{name}.json")))
+    }
 }
 
 /// Called on hover, never by the regular local refresh loop. Credentials stay in memory.
 pub fn refresh(home: &Path) -> Result<(), String> {
+    let profiles = crate::claude_profiles(home);
     let (claude, codex) = std::thread::scope(|scope| {
-        let claude = scope.spawn(|| refresh_claude(home));
+        let claude: Vec<_> = profiles.iter().map(|(name, dir)| scope.spawn(move || refresh_claude(home, name, dir))).collect();
         let codex = refresh_codex(home);
-        (claude.join().unwrap(), codex)
+        (claude.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>(), codex)
     });
-    let errors: Vec<_> = [("Claude", claude), ("Codex", codex)].into_iter()
+    let errors: Vec<_> = profiles.iter().map(|(name, _)| tool_label("Claude", Some(name))).zip(claude)
+        .chain([("Codex".to_string(), codex)])
         .filter_map(|(tool, result)| result.err().map(|error| format!("{tool}: {error}"))).collect();
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
 }
 
-fn refresh_claude(home: &Path) -> Result<(), String> {
-    let token = claude_token(home).ok_or("Claude Code login unavailable")?;
+fn refresh_claude(home: &Path, name: &str, dir: &Path) -> Result<(), String> {
+    let token = claude_token(home, dir).ok_or("Claude Code login unavailable")?;
     // shortcut: uses Claude Code's internal usage endpoint; update if Anthropic changes it.
     let usage = get_usage("https://api.anthropic.com/api/oauth/usage",
         &format!("Authorization: Bearer {token}\nanthropic-beta: oauth-2025-04-20\n"))?;
-    save_claude_usage(home, &usage).map_err(|_| "Could not cache usage response".into())
+    save_claude_usage(home, &claude_files(home, name, dir).1, &usage).map_err(|_| "Could not cache usage response".into())
 }
 
 fn refresh_codex(home: &Path) -> Result<(), String> {
@@ -76,24 +100,37 @@ fn codex_dir(home: &Path) -> PathBuf {
     std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"))
 }
 
-fn claude_token(home: &Path) -> Option<String> {
+/// First 8 hex digits of the SHA-256 of the path.
+fn path_hash(dir: &Path) -> Option<String> {
+    let mut child = Command::new("/usr/bin/shasum").args(["-a", "256"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    child.stdin.take()?.write_all(dir.as_os_str().as_encoded_bytes()).ok()?;
+    String::from_utf8(child.wait_with_output().ok()?.stdout).ok()?.get(..8).map(str::to_string)
+}
+
+fn claude_token(home: &Path, dir: &Path) -> Option<String> {
     let parse = |data: &[u8]| -> Option<String> {
         let v: Value = serde_json::from_slice(data).ok()?;
         let token = v["claudeAiOauth"]["accessToken"].as_str()?;
         header_value(token).then(|| token.to_string())
     };
-    if let Some(token) = fs::read(home.join(".claude/.credentials.json")).ok().and_then(|data| parse(&data)) {
+    if let Some(token) = fs::read(dir.join(".credentials.json")).ok().and_then(|data| parse(&data)) {
         return Some(token);
     }
     if cfg!(target_os = "macos") {
+        // shortcut: Claude Code names the Keychain item of a non-default config dir with a hash of the path as
+        // given in CLAUDE_CONFIG_DIR; list the dir spelled the same way, and update this if Claude Code changes it.
+        let service = if dir == home.join(".claude") { "Claude Code-credentials".to_string() } else {
+            format!("Claude Code-credentials-{}", path_hash(dir)?)
+        };
         let output = Command::new("/usr/bin/security")
-            .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]).output().ok()?;
+            .args(["find-generic-password", "-s", &service, "-w"]).output().ok()?;
         if output.status.success() { return parse(&output.stdout); }
     }
     None
 }
 
-fn save_claude_usage(home: &Path, usage: &Value) -> std::io::Result<()> {
+fn save_claude_usage(home: &Path, path: &Path, usage: &Value) -> std::io::Result<()> {
     let mut cached = serde_json::Map::new();
     for key in ["five_hour", "seven_day"] {
         if let Some(used) = usage[key]["utilization"].as_f64().filter(|u| *u >= 0.0) {
@@ -104,7 +141,7 @@ fn save_claude_usage(home: &Path, usage: &Value) -> std::io::Result<()> {
         }
     }
     if cached.is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
-    save_usage(home, "claude", Value::Object(cached))
+    save_usage(home, path, Value::Object(cached))
 }
 
 fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Result<()> {
@@ -116,24 +153,23 @@ fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Res
         }
     }
     if codex_windows(&limits).is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
-    save_usage(home, "codex", json!({"account_id": account, "fetched_at": now(), "rate_limits": limits}))
+    save_usage(home, &home.join(".cache/ccs/codex-limits.json"), json!({"account_id": account, "fetched_at": now(), "rate_limits": limits}))
 }
 
-fn save_usage(home: &Path, tool: &str, usage: Value) -> std::io::Result<()> {
-    let path = home.join(format!(".cache/ccs/{tool}-limits.json"));
+fn save_usage(home: &Path, path: &Path, usage: Value) -> std::io::Result<()> {
     crate::cache::prepare(home)?;
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     crate::cache::write_new(&tmp, &usage.to_string())?;
-    let result = fs::rename(&tmp, &path);
+    let result = fs::rename(&tmp, path);
     if result.is_err() { let _ = fs::remove_file(tmp); }
     result
 }
 
 /// Prefer the latest /usage or status-line sample, falling back per window if one is missing.
-fn claude(home: &Path) -> Vec<Window> {
-    let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap_or_default()).unwrap_or_default();
+fn claude(home: &Path, name: &str, dir: &Path) -> Vec<Window> {
+    let (state, path) = claude_files(home, name, dir);
+    let v: Value = serde_json::from_str(&fs::read_to_string(state).unwrap_or_default()).unwrap_or_default();
     let u = &v["cachedUsageUtilization"]["utilization"];
-    let path = home.join(".cache/ccs/claude-limits.json");
     let status: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap_or_default()).unwrap_or_default();
     let status_at = fs::metadata(&path).and_then(|m| m.modified()).ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
@@ -240,21 +276,22 @@ fn label(secs: u64) -> String {
     }
 }
 
-/// "Claude 5h 9% ↻2h · weekly 93% ↻21h   Codex weekly 1% ↻1d"
-pub fn line(limits: &[(&str, Vec<Window>)]) -> String {
-    limits.iter().map(|(tool, ws)| {
+/// "Claude 5h 9% ↻2h · weekly 93% ↻21h   Claude work 5h 2%   Codex weekly 1% ↻1d"
+pub fn line(limits: &[Limits]) -> String {
+    limits.iter().map(|(tool, ws, profile)| {
         let parts: Vec<String> = ws.iter().map(|w| {
             let reset = w.resets_at.map(|r| format!(" ↻{}", until(r))).unwrap_or_default();
             format!("{} {:.0}%{reset}", w.label, w.used)
         }).collect();
-        format!("{tool} {}", parts.join(" · "))
+        format!("{} {}", tool_label(tool, profile.as_deref()), parts.join(" · "))
     }).collect::<Vec<_>>().join("   ")
 }
 
-/// `[{tool, windows: [{label, used, reset}]}]`; each window is colored by its own usage in the notch.
-pub fn to_json(limits: &[(&str, Vec<Window>)]) -> Value {
-    limits.iter().map(|(tool, ws)| json!({
+/// `[{tool, profile, windows: [{label, used, reset}]}]`; each window is colored by its own usage in the notch.
+pub fn to_json(limits: &[Limits]) -> Value {
+    limits.iter().map(|(tool, ws, profile)| json!({
         "tool": tool,
+        "profile": profile,
         "windows": ws.iter().map(|w| json!({
             "label": w.label,
             "used": w.used,
@@ -314,6 +351,14 @@ mod tests {
         let home = std::env::temp_dir().join(format!("ccs-limits-{}", std::process::id()));
         let day = home.join(".codex/sessions/2026/11/17");
         fs::create_dir_all(&day).unwrap();
+        // a second profile keeps its state in its own config dir, and its fetched usage in its own cache file
+        fs::create_dir_all(home.join("work")).unwrap();
+        fs::create_dir_all(home.join(".config/ccs")).unwrap();
+        fs::write(home.join(".config/ccs/claude-dirs"), "~/work\n~/logged-out\n").unwrap();
+        fs::write(home.join("work/.credentials.json"), json!({"claudeAiOauth": {"accessToken": "work-token"}}).to_string()).unwrap();
+        assert_eq!(claude_token(&home, &home.join("work")).as_deref(), Some("work-token"));
+        save_claude_usage(&home, &claude_files(&home, "work", &home.join("work")).1,
+            &json!({"five_hour": {"utilization": 41, "resets_at": "2999-01-01T00:00:00Z"}})).unwrap();
         let soon = now() + 3600 + 120; // buffer so the "1h" below never becomes "59m"
         fs::write(home.join(".claude.json"), json!({"cachedUsageUtilization": {"utilization": {
             "five_hour": {"utilization": 9, "resets_at": "1970-01-01T00:00:00Z"},  // already reset -> 0%
@@ -324,13 +369,18 @@ mod tests {
 
         let l = read(&home);
         fs::remove_dir_all(&home).ok();
-        let summary: Vec<_> = l.iter().map(|(t, ws)| (*t, ws.iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>())).collect();
+        let summary: Vec<_> = l.iter().map(|(t, ws, p)| (*t, p.as_deref(), ws.iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>())).collect();
         assert_eq!(summary, [
-            ("Claude", vec![("5h".to_string(), 0.0), ("weekly".to_string(), 93.0)]),
-            ("Codex", vec![("weekly".to_string(), 1.0)]),
+            ("Claude", Some("default"), vec![("5h".to_string(), 0.0), ("weekly".to_string(), 93.0)]),
+            ("Claude", Some("work"), vec![("5h".to_string(), 41.0)]),
+            ("Codex", None, vec![("weekly".to_string(), 1.0)]),
         ]);
         assert_eq!(to_json(&l)[0]["windows"][1]["used"], 93.0);
-        assert_eq!(to_json(&l)[1]["windows"][0]["reset"], "1h");
+        assert_eq!((&to_json(&l)[1]["profile"], &to_json(&l)[2]["profile"]), (&json!("work"), &Value::Null));
+        assert_eq!(to_json(&l)[2]["windows"][0]["reset"], "1h");
+        assert!(line(&l).contains("   Claude work 5h 41%"), "{}", line(&l));
+        #[cfg(target_os = "macos")]
+        assert_eq!(path_hash(Path::new("abc")).as_deref(), Some("ba7816bf"));
         assert_eq!(until(now() + 34 * 3600 + 60), "1d 10h");
     }
 
@@ -357,7 +407,7 @@ mod tests {
         fs::write(home.join(".claude.json"), cache(1)).unwrap();
         fs::write(home.join(".cache/ccs/claude-limits.json"),
             json!({"seven_day": {"used_percentage": 100, "resets_at": now() + 7200}}).to_string()).unwrap();
-        let used = || claude(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        let used = || claude(&home, "default", &home.join(".claude")).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
         fs::write(home.join(".claude.json"), cache((now() + 60) * 1000)).unwrap();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
@@ -371,11 +421,12 @@ mod tests {
         let home = std::env::temp_dir().join(format!("ccs-live-usage-{}", std::process::id()));
         let live = json!({"five_hour": {"utilization": 0, "resets_at": null},
             "seven_day": {"utilization": 100, "resets_at": "2999-01-01T00:00:00Z"}});
-        save_claude_usage(&home, &live).unwrap();
-        let used = || claude(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        let cache = home.join(".cache/ccs/claude-limits.json");
+        save_claude_usage(&home, &cache, &live).unwrap();
+        let used = || claude(&home, "default", &home.join(".claude")).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
         for invalid in [json!({}), json!({"error": "unauthorized"}), json!({"five_hour": {"utilization": "unknown"}})] {
-            assert!(save_claude_usage(&home, &invalid).is_err());
+            assert!(save_claude_usage(&home, &cache, &invalid).is_err());
             assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
         }
         fs::remove_dir_all(home).unwrap();

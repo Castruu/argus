@@ -307,6 +307,13 @@ struct ToolLimits: Decodable, Equatable {
     }
     let tool: String
     let windows: [Window]
+    var profile: String? // Claude profile these limits belong to; nil for Codex
+}
+
+/// Footer limits: Codex plus one Claude profile, `picked` when it has sessions, else the default.
+func limits(_ all: [ToolLimits], picked: String, sessions: [Session]) -> [ToolLimits] {
+    let profile = sessions.contains { $0.profile == picked } ? picked : "default"
+    return all.filter { $0.profile == nil || $0.profile == profile }
 }
 
 func run(_ bin: String, _ args: [String]) -> Data {
@@ -341,6 +348,7 @@ struct NotchView: View {
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
     /// The open panel lists the picked profile; the closed notch and the chimes keep covering every session.
     var shown: [Session] { sessions(store.sessions, inProfile: profileID) }
+    var shownLimits: [ToolLimits] { limits(store.limits, picked: profileID, sessions: store.sessions) }
 
     var body: some View {
         let shape = UnevenRoundedRectangle(bottomLeadingRadius: open ? 18 : 10, bottomTrailingRadius: open ? 18 : 10)
@@ -364,7 +372,7 @@ struct NotchView: View {
                 } else {
                     cols
                 }
-                if !store.limits.isEmpty {
+                if !shownLimits.isEmpty {
                     limitsFooter.frame(width: contentWidth)
                 }
             } else if let f = store.finished {
@@ -501,7 +509,7 @@ struct NotchView: View {
     }
 
     func limitItems(widest: Bool = false) -> some View {
-        ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
+        ForEach(shownLimits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
             let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
             HStack(spacing: 4) {
                 Text(label)
