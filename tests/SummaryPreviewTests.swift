@@ -113,6 +113,9 @@ import SwiftUI
         preview.close()
         wait(0.10)
         assert(!store.open, "The overlay should close after leaving both it and its card")
+        preview.enter(row, text: text, rect: rect)
+        wait(0.30)
+        assert(!preview.isShown && !store.open, "A row fading out with the closed overlay must not reopen it")
         window.orderOut(nil)
         print("Summary preview tests passed")
     }

@@ -5,6 +5,8 @@ import SwiftUI
     @Published private(set) var isShown = false
     let popover = NSPopover()
     weak var host: NSView?
+    /// Set while the notch panel is closed: its rows are still hoverable as they fade out, and a card would reopen the panel.
+    var suspended = false
     private var anchorID: UUID?
     private var rect = CGRect.zero
     private var text = ""
@@ -21,6 +23,7 @@ import SwiftUI
     }
 
     func enter(_ id: UUID, text: String, rect: CGRect) {
+        guard !suspended else { return }
         if anchorID != id { close(); anchorID = id }
         self.text = text
         self.rect = rect

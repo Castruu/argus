@@ -435,6 +435,7 @@ struct NotchView: View {
     }
 
     private func setOpen(_ value: Bool) {
+        summaryPreview.suspended = !value
         store.open = value
         withAnimation(.spring(duration: 0.25)) { open = value }
     }
