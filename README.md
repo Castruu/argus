@@ -106,11 +106,11 @@ swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/SummaryPreviewTests.
 /tmp/ccs-summary-preview-tests
 ```
 
-## Other Claude config directories
+## Other Claude and Codex directories
 
-Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude`. List those directories in `~/.config/ccs/claude-dirs`, one per line (`~/` is expanded); `~/.claude` is always scanned. Restart the notch after editing the list. Hooks go in each directory's own `settings.json`.
+Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude`. List those directories in `~/.config/ccs/claude-dirs`, one per line (`~/` is expanded); `~/.claude` is always scanned. Do the same for `CODEX_HOME` directories in `~/.config/ccs/codex-dirs`; `~/.codex` is always scanned. Restart the notch after editing the list. Hooks go in each directory's own `settings.json` (Claude) or `hooks.json` (Codex).
 
-Each directory is a profile, named after its folder (`default` for `~/.claude`). When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions (Codex sessions always show), or `all`. The pick is remembered. The usage footer shows the picked profile's Claude limits, or every profile's while `all` is picked, labelled by profile. The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
+Each directory is a profile, named after its folder (`default` for `~/.claude` and `~/.codex`); a Claude and a Codex directory with the same folder name are one profile. When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions, or `all`. The pick is remembered. The usage footer shows the picked profile's limits, or every profile's while `all` is picked, with the profile named (`Claude work 5h`). The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
 
 ```
 ~/.moirai/homes/claude/personal
@@ -159,7 +159,7 @@ Check both summary hooks without calling a model with `python3 tests/SummaryHook
 
 ## Keeping limits current
 
-Opening the notch fetches current Claude and Codex usage concurrently. Claude uses its existing login from macOS Keychain or `~/.claude/.credentials.json`; Codex uses the ChatGPT login in `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). Each profile is fetched with its own login: `.credentials.json` in its config directory, or the Keychain item Claude Code created for that directory (list the directory spelled as in `CLAUDE_CONFIG_DIR`; macOS asks once per login). API-key logins have no subscription quota to fetch. Each request has a five-second timeout and keeps credentials in memory. Existing logins are never renewed or rewritten.
+Opening the notch fetches current Claude and Codex usage concurrently. Claude uses its existing login from macOS Keychain or `~/.claude/.credentials.json`; Codex uses the ChatGPT login in `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`), and `auth.json` in each listed Codex directory. Each profile is fetched with its own login: `.credentials.json` in its config directory, or the Keychain item Claude Code created for that directory (list the directory spelled as in `CLAUDE_CONFIG_DIR`; macOS asks once per login). API-key logins have no subscription quota to fetch. Each request has a five-second timeout and keeps credentials in memory. Existing logins are never renewed or rewritten.
 
 `ccs --limits --refresh` does the same in the terminal. Ordinary refreshes only read local caches; newer Codex session usage events override older API samples, and reset windows remain visible at 0%. A failed fetch keeps the last available values for that provider.
 

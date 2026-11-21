@@ -17,7 +17,7 @@ use std::{
 
 struct Session {
     tool: &'static str,
-    profile: Option<String>, // Claude config dir the session runs under: "default" for ~/.claude, else the dir's name
+    profile: Option<String>, // config dir the session runs under: "default" for ~/.claude or ~/.codex, else the dir's name
     id: String,
     title: String,
     cwd: String,
@@ -67,7 +67,7 @@ fn main() {
     loop {
         let (procs, codex_running) = processes();
         // lsof is only worth running when a codex process exists
-        let open = if codex_running { open_codex_rollouts() } else { vec![] };
+        let open = if codex_running { open_codex_rollouts(&codex_profiles(&home())) } else { vec![] };
         let sessions = collect(&home(), &open, &procs);
         if as_json {
             println!("{}", to_json(&sessions));
@@ -299,15 +299,22 @@ fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = 
         .filter_map(|l| serde_json::from_str(&l).ok())
 }
 
-/// Claude profiles as (name, config dir). "default" is `~/.claude` and comes first; the rest are the config dirs
-/// (CLAUDE_CONFIG_DIR) listed one per line in ~/.config/ccs/claude-dirs, named after their folder.
-fn claude_profiles(home: &Path) -> Vec<(String, PathBuf)> {
-    let listed = fs::read_to_string(home.join(".config/ccs/claude-dirs")).unwrap_or_default();
+/// Profiles as (name, dir). "default" is the tool's usual dir and comes first; the rest are the dirs listed
+/// one per line in ~/.config/ccs/<list>, named after their folder. Claude and Codex dirs with the same folder
+/// name are one profile.
+fn profiles(home: &Path, list: &str, default: &str) -> Vec<(String, PathBuf)> {
+    let listed = fs::read_to_string(home.join(".config/ccs").join(list)).unwrap_or_default();
     let listed = listed.lines().map(str::trim).filter(|l| !l.is_empty())
         .map(|l| l.strip_prefix("~/").map_or_else(|| PathBuf::from(l), |rest| home.join(rest)))
         .map(|dir| (dir.file_name().map_or("?".into(), |n| n.to_string_lossy().into_owned()), dir));
-    std::iter::once(("default".to_string(), home.join(".claude"))).chain(listed).collect()
+    std::iter::once(("default".to_string(), home.join(default))).chain(listed).collect()
 }
+
+/// `~/.claude` and the CLAUDE_CONFIG_DIR dirs in ~/.config/ccs/claude-dirs.
+fn claude_profiles(home: &Path) -> Vec<(String, PathBuf)> { profiles(home, "claude-dirs", ".claude") }
+
+/// `~/.codex` and the CODEX_HOME dirs in ~/.config/ccs/codex-dirs.
+fn codex_profiles(home: &Path) -> Vec<(String, PathBuf)> { profiles(home, "codex-dirs", ".codex") }
 
 fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session> {
     let profiles = claude_profiles(home);
@@ -459,14 +466,15 @@ fn find_claude_transcript(config: &Path, id: &str) -> Option<PathBuf> {
 /// Codex has no live-session registry, but a running `codex` keeps its rollout file open,
 /// so open rollouts == live sessions. Closed sessions disappear immediately.
 /// Open rollout files with the pid holding each; the pid gives the session's terminal (tty).
-fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
+fn open_codex_rollouts(profiles: &[(String, PathBuf)]) -> Vec<(PathBuf, u64)> {
+    let sessions: Vec<PathBuf> = profiles.iter().map(|(_, dir)| dir.join("sessions")).collect();
     let Ok(out) = Command::new("lsof").args(["-nP", "-c", "codex", "-Fpn"]).output() else { return vec![] };
     let mut pid = 0;
     let mut open = vec![];
     for l in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some(p) = l.strip_prefix('p') {
             pid = p.parse().unwrap_or(0); // "p<pid>" starts each process's files
-        } else if let Some(p) = l.strip_prefix('n').filter(|p| p.contains("/.codex/sessions/") && p.ends_with(".jsonl")) {
+        } else if let Some(p) = l.strip_prefix('n').filter(|p| p.ends_with(".jsonl") && sessions.iter().any(|s| Path::new(p).starts_with(s))) {
             open.push((PathBuf::from(p), pid));
         }
     }
@@ -477,8 +485,8 @@ fn open_codex_rollouts() -> Vec<(PathBuf, u64)> {
 
 fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &mut Value) -> Vec<Session> {
     if open.is_empty() { return vec![]; }
-    let index = home.join(".codex/session_index.jsonl");
-    let titles: HashMap<String, String> = read_jsonl(&index, |_| true)
+    let profiles = codex_profiles(home);
+    let titles: HashMap<String, String> = profiles.iter().flat_map(|(_, dir)| read_jsonl(&dir.join("session_index.jsonl"), |_| true).collect::<Vec<_>>())
         .filter_map(|t| Some((t["id"].as_str()?.to_string(), t["thread_name"].as_str()?.to_string())))
         .collect(); // later entries replace earlier titles
     let mut out = vec![];
@@ -510,7 +518,7 @@ fn codex_sessions(home: &Path, open: &[(PathBuf, u64)], procs: &Procs, cache: &m
         let title = titles.get(&id).cloned().unwrap_or_else(|| "?".to_string());
         out.push(Session {
             tool: "codex",
-            profile: None,
+            profile: Some(profiles.iter().skip(1).find(|(_, dir)| path.starts_with(dir)).map_or("default", |(name, _)| name).to_string()),
             id,
             title,
             cwd: entry["cwd"].as_str().or(meta["cwd"].as_str()).unwrap_or_default().to_string(),
@@ -856,6 +864,9 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
             r#"{"type":"turn_context","payload":{"cwd":"/y/worktrees/api"}}"#, "\n",
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add tests"}]}}"#, "\n"));
+        w(".config/ccs/codex-dirs", "~/other-home\n");
+        w("other-home/sessions/2026/01/01/rollout-2.jsonl", concat!(r#"{"type":"session_meta","payload":{"id":"cx2","cwd":"/y/api","source":"cli"}}"#, "\n"));
+        w("other-home/session_index.jsonl", r#"{"id":"cx2","thread_name":"Other Codex"}"#);
         w(".codex/sessions/2026/01/01/rollout-closed.jsonl", r#"{"type":"session_meta","payload":{"id":"gone","cwd":"/z","source":"cli"}}"#);
         w(".codex/sessions/2026/01/01/rollout-exec.jsonl", r#"{"type":"session_meta","payload":{"id":"ex","cwd":"/z","source":"exec"}}"#);
         w(".codex/session_index.jsonl", r#"{"id":"cx1","thread_name":"API tests"}"#);
@@ -865,7 +876,8 @@ mod tests {
 
         let rollouts = home.join(".codex/sessions/2026/01/01");
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
-        let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1)];
+        let open = [(rollouts.join("rollout-1.jsonl"), 1), (rollouts.join("rollout-1.jsonl"), 2), (rollouts.join("rollout-exec.jsonl"), 1),
+            (home.join("other-home/sessions/2026/01/01/rollout-2.jsonl"), 1)];
         let p = |tty: Option<&str>| (tty.map(String::from), 0, String::new());
         #[cfg(target_os = "macos")]
         let terminal = {
@@ -888,11 +900,13 @@ mod tests {
         assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
             "keep the Codex transcript offset between refresh processes");
         fs::remove_dir_all(&home).ok();
-        assert_eq!(s.len(), 4, "dead pids, closed codex sessions and headless runs must be skipped");
+        assert_eq!(s.len(), 5, "dead pids, closed codex sessions and headless runs must be skipped");
         let other = s.iter().find(|s| s.id == "other").unwrap();
         assert_eq!(other.title, "Elsewhere", "listed config dirs are scanned with their transcripts");
         let profile = |id: &str| s.iter().find(|s| s.id == id).unwrap().profile.as_deref();
-        assert_eq!((profile("abc"), profile("other"), profile("cx1")), (Some("default"), Some("other-home"), None));
+        assert_eq!((profile("abc"), profile("other"), profile("cx1"), profile("cx2")),
+            (Some("default"), Some("other-home"), Some("default"), Some("other-home")), "same folder name, same profile");
+        assert_eq!(s.iter().find(|s| s.id == "cx2").unwrap().title, "Other Codex", "each Codex home has its own title index");
         let c = s.iter().find(|s| s.id == "abc").unwrap();
         assert!(c.stale && !c.needs, "an old question is stale, not needs-you");
         assert_eq!((c.pr["number"].as_u64(), c.pr["url"].as_str()), (Some(7), Some("https://github.com/o/r/pull/7")),

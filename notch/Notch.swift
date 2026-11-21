@@ -13,11 +13,10 @@ struct Session: Decodable, Identifiable, Equatable {
     var pr: PR?
     var pr_open_url: String? // supplied by ccs after host, path and PR number validation
     var app: String? // bundle of the terminal or editor the session runs in
-    var profile: String? // Claude config dir: "default" for ~/.claude, else the dir's name; nil for Codex
+    var profile: String? // config dir: "default" for ~/.claude or ~/.codex, else the dir's name; nil from older ccs
 }
 
-/// Sessions of one Claude profile. Codex has no profiles, so its sessions always show;
-/// a profile with no session left (or none picked) shows everything.
+/// Sessions of one profile (and any without one). A profile with no session left, or none picked, shows everything.
 func sessions(_ all: [Session], inProfile id: String) -> [Session] {
     all.contains { $0.profile == id } ? all.filter { $0.profile == nil || $0.profile == id } : all
 }
@@ -210,10 +209,12 @@ final class Store: ObservableObject {
         // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        // other Claude config dirs (CLAUDE_CONFIG_DIR), the same list ccs scans
-        let listed = ((try? String(contentsOfFile: home + "/.config/ccs/claude-dirs", encoding: .utf8)) ?? "").split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            .map { ($0 as NSString).expandingTildeInPath + "/sessions" }
+        // other Claude and Codex profile dirs (CLAUDE_CONFIG_DIR, CODEX_HOME), the same lists ccs scans
+        let listed = ["claude-dirs", "codex-dirs"].flatMap { list in
+            ((try? String(contentsOfFile: home + "/.config/ccs/" + list, encoding: .utf8)) ?? "").split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                .map { ($0 as NSString).expandingTildeInPath + "/sessions" }
+        }
         let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"] + listed
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in
@@ -307,10 +308,10 @@ struct ToolLimits: Decodable, Equatable {
     }
     let tool: String
     let windows: [Window]
-    var profile: String? // Claude profile these limits belong to; nil for Codex
+    var profile: String? // profile these limits belong to; nil from older ccs
 }
 
-/// Footer limits: Codex plus the `picked` Claude profile when it has sessions, else every profile.
+/// Footer limits: the `picked` profile's when it has sessions, else every profile's.
 func limits(_ all: [ToolLimits], picked: String, sessions: [Session]) -> [ToolLimits] {
     sessions.contains { $0.profile == picked } ? all.filter { $0.profile == nil || $0.profile == picked } : all
 }
@@ -508,9 +509,10 @@ struct NotchView: View {
     }
 
     func limitItems(widest: Bool = false) -> some View {
-        // several Claude profiles side by side go by their profile name instead of "Claude"
-        let several = shownLimits.filter { $0.profile != nil }.count > 1
-        return ForEach(shownLimits.flatMap { t in t.windows.map { ("\(several ? t.profile ?? t.tool : t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
+        // every profile side by side: the non-default ones carry their name, "Claude work 5h"
+        let all = !store.sessions.contains { $0.profile == profileID }
+        let name = { (t: ToolLimits) in all && t.profile != nil && t.profile != "default" ? "\(t.tool) \(t.profile!)" : t.tool }
+        return ForEach(shownLimits.flatMap { t in t.windows.map { ("\(name(t)) \($0.label)", $0) } }, id: \.0) { label, w in
             let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
             HStack(spacing: 4) {
                 Text(label)

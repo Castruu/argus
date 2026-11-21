@@ -16,22 +16,31 @@ pub struct Window {
     pub resets_at: Option<u64>,
 }
 
-/// (tool, windows, Claude profile): each Claude profile is its own login with its own limits.
-pub type Limits = (&'static str, Vec<Window>, Option<String>);
+/// (tool, windows, profile): each profile is its own login with its own limits.
+pub type Limits = (&'static str, Vec<Window>, String);
 
-/// One entry per Claude profile and one for Codex, skipping those without cached limits.
+/// One entry per Claude and Codex profile, skipping those without cached limits.
 pub fn read(home: &Path) -> Vec<Limits> {
-    crate::claude_profiles(home).into_iter().map(|(name, dir)| ("Claude", claude(home, &name, &dir), Some(name)))
-        .chain([("Codex", codex(home), None)])
+    crate::claude_profiles(home).into_iter().map(|(name, dir)| ("Claude", claude(home, &name, &dir), name))
+        .chain(codex_profiles(home).into_iter().map(|(name, dir)| ("Codex", codex(home, &name, &dir), name)))
         .filter(|(_, w, _)| !w.is_empty()).collect()
 }
 
-/// "Claude" for the default profile and Codex, "Claude work" for another profile.
-fn tool_label(tool: &str, profile: Option<&str>) -> String {
-    match profile {
-        Some(p) if p != "default" => format!("{tool} {p}"),
-        _ => tool.to_string(),
-    }
+/// "Claude" for the default profile, "Claude work" for another.
+fn tool_label(tool: &str, profile: &str) -> String {
+    if profile == "default" { tool.to_string() } else { format!("{tool} {profile}") }
+}
+
+/// Codex profiles; the default one follows CODEX_HOME, like Codex itself.
+fn codex_profiles(home: &Path) -> Vec<(String, PathBuf)> {
+    let mut profiles = crate::codex_profiles(home);
+    profiles[0].1 = codex_dir(home);
+    profiles
+}
+
+/// Our usage cache for a Codex profile.
+fn codex_cache(home: &Path, name: &str) -> PathBuf {
+    home.join(".cache/ccs").join(if name == "default" { "codex-limits.json".to_string() } else { format!("codex-limits-{name}.json") })
 }
 
 /// A profile's Claude Code state file and our usage cache. `~/.claude` keeps its state beside it, in `~/.claude.json`.
@@ -45,14 +54,15 @@ fn claude_files(home: &Path, name: &str, dir: &Path) -> (PathBuf, PathBuf) {
 
 /// Called on hover, never by the regular local refresh loop. Credentials stay in memory.
 pub fn refresh(home: &Path) -> Result<(), String> {
-    let profiles = crate::claude_profiles(home);
-    let (claude, codex) = std::thread::scope(|scope| {
-        let claude: Vec<_> = profiles.iter().map(|(name, dir)| scope.spawn(move || refresh_claude(home, name, dir))).collect();
-        let codex = refresh_codex(home);
-        (claude.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>(), codex)
+    let (claude, codex) = (crate::claude_profiles(home), codex_profiles(home));
+    let results = std::thread::scope(|scope| {
+        // start every request before waiting on any
+        let jobs: Vec<_> = claude.iter().map(|(name, dir)| (tool_label("Claude", name), scope.spawn(move || refresh_claude(home, name, dir))))
+            .chain(codex.iter().map(|(name, dir)| (tool_label("Codex", name), scope.spawn(move || refresh_codex(home, name, dir)))))
+            .collect();
+        jobs.into_iter().map(|(tool, job)| (tool, job.join().unwrap())).collect::<Vec<_>>()
     });
-    let errors: Vec<_> = profiles.iter().map(|(name, _)| tool_label("Claude", Some(name))).zip(claude)
-        .chain([("Codex".to_string(), codex)])
+    let errors: Vec<_> = results.into_iter()
         .filter_map(|(tool, result)| result.err().map(|error| format!("{tool}: {error}"))).collect();
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
 }
@@ -65,8 +75,8 @@ fn refresh_claude(home: &Path, name: &str, dir: &Path) -> Result<(), String> {
     save_claude_usage(home, &claude_files(home, name, dir).1, &usage).map_err(|_| "Could not cache usage response".into())
 }
 
-fn refresh_codex(home: &Path) -> Result<(), String> {
-    let auth: Value = serde_json::from_slice(&fs::read(codex_dir(home).join("auth.json"))
+fn refresh_codex(home: &Path, name: &str, dir: &Path) -> Result<(), String> {
+    let auth: Value = serde_json::from_slice(&fs::read(dir.join("auth.json"))
         .map_err(|_| "Codex login unavailable")?).map_err(|_| "Invalid Codex login")?;
     let token = auth["tokens"]["access_token"].as_str().filter(|s| header_value(s))
         .ok_or("Usage requires a Codex ChatGPT login")?;
@@ -77,7 +87,7 @@ fn refresh_codex(home: &Path) -> Result<(), String> {
     }
     // shortcut: uses the same internal usage endpoint as Codex; update if OpenAI changes it.
     let usage = get_usage("https://chatgpt.com/backend-api/wham/usage", &headers)?;
-    save_codex_usage(home, &usage, &auth["tokens"]["account_id"])
+    save_codex_usage(home, &codex_cache(home, name), &usage, &auth["tokens"]["account_id"])
         .map_err(|_| "Could not cache usage response".into())
 }
 
@@ -144,7 +154,7 @@ fn save_claude_usage(home: &Path, path: &Path, usage: &Value) -> std::io::Result
     save_usage(home, path, Value::Object(cached))
 }
 
-fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Result<()> {
+fn save_codex_usage(home: &Path, path: &Path, usage: &Value, account: &Value) -> std::io::Result<()> {
     let mut limits = json!({});
     for (source, key) in [("primary_window", "primary"), ("secondary_window", "secondary")] {
         let w = &usage["rate_limit"][source];
@@ -153,7 +163,7 @@ fn save_codex_usage(home: &Path, usage: &Value, account: &Value) -> std::io::Res
         }
     }
     if codex_windows(&limits).is_empty() { return Err(std::io::Error::other("Missing usage windows")); }
-    save_usage(home, &home.join(".cache/ccs/codex-limits.json"), json!({"account_id": account, "fetched_at": now(), "rate_limits": limits}))
+    save_usage(home, path, json!({"account_id": account, "fetched_at": now(), "rate_limits": limits}))
 }
 
 fn save_usage(home: &Path, path: &Path, usage: Value) -> std::io::Result<()> {
@@ -186,9 +196,9 @@ fn claude(home: &Path, name: &str, dir: &Path) -> Vec<Window> {
 }
 
 /// Prefer the API sample until a newer usage event arrives in the session logs.
-fn codex(home: &Path) -> Vec<Window> {
-    let auth: Value = serde_json::from_slice(&fs::read(codex_dir(home).join("auth.json")).unwrap_or_default()).unwrap_or_default();
-    let cache: Value = serde_json::from_slice(&fs::read(home.join(".cache/ccs/codex-limits.json")).unwrap_or_default()).unwrap_or_default();
+fn codex(home: &Path, name: &str, dir: &Path) -> Vec<Window> {
+    let auth: Value = serde_json::from_slice(&fs::read(dir.join("auth.json")).unwrap_or_default()).unwrap_or_default();
+    let cache: Value = serde_json::from_slice(&fs::read(codex_cache(home, name)).unwrap_or_default()).unwrap_or_default();
     let cached = if auth["tokens"]["access_token"].is_string() && cache["account_id"] == auth["tokens"]["account_id"] {
         codex_windows(&cache["rate_limits"])
     } else { vec![] };
@@ -197,7 +207,7 @@ fn codex(home: &Path) -> Vec<Window> {
         v.sort_unstable_by(|a, b| b.cmp(a)); // YYYY/MM/DD/rollout-<timestamp> sorts by time
         v
     };
-    let files = newest_first(&codex_dir(home).join("sessions")).into_iter()
+    let files = newest_first(&dir.join("sessions")).into_iter()
         .flat_map(|y| newest_first(&y)).flat_map(|m| newest_first(&m)).flat_map(|d| newest_first(&d))
         .take(20); // bounded: don't read every old session if none has limits
     for f in files {
@@ -283,7 +293,7 @@ pub fn line(limits: &[Limits]) -> String {
             let reset = w.resets_at.map(|r| format!(" ↻{}", until(r))).unwrap_or_default();
             format!("{} {:.0}%{reset}", w.label, w.used)
         }).collect();
-        format!("{} {}", tool_label(tool, profile.as_deref()), parts.join(" · "))
+        format!("{} {}", tool_label(tool, profile), parts.join(" · "))
     }).collect::<Vec<_>>().join("   ")
 }
 
@@ -359,6 +369,11 @@ mod tests {
         assert_eq!(claude_token(&home, &home.join("work")).as_deref(), Some("work-token"));
         save_claude_usage(&home, &claude_files(&home, "work", &home.join("work")).1,
             &json!({"five_hour": {"utilization": 41, "resets_at": "2999-01-01T00:00:00Z"}})).unwrap();
+        // the same folder as a Codex home: its own login, fetched usage and cache file
+        fs::write(home.join(".config/ccs/codex-dirs"), "~/work\n").unwrap();
+        fs::write(home.join("work/auth.json"), json!({"tokens": {"access_token": "fixture", "account_id": "w"}}).to_string()).unwrap();
+        save_codex_usage(&home, &codex_cache(&home, "work"), &json!({"rate_limit": {
+            "primary_window": {"used_percent": 7, "limit_window_seconds": 18000, "reset_at": null}}}), &json!("w")).unwrap();
         let soon = now() + 3600 + 120; // buffer so the "1h" below never becomes "59m"
         fs::write(home.join(".claude.json"), json!({"cachedUsageUtilization": {"utilization": {
             "five_hour": {"utilization": 9, "resets_at": "1970-01-01T00:00:00Z"},  // already reset -> 0%
@@ -369,16 +384,17 @@ mod tests {
 
         let l = read(&home);
         fs::remove_dir_all(&home).ok();
-        let summary: Vec<_> = l.iter().map(|(t, ws, p)| (*t, p.as_deref(), ws.iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>())).collect();
+        let summary: Vec<_> = l.iter().map(|(t, ws, p)| (*t, p.as_str(), ws.iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>())).collect();
         assert_eq!(summary, [
-            ("Claude", Some("default"), vec![("5h".to_string(), 0.0), ("weekly".to_string(), 93.0)]),
-            ("Claude", Some("work"), vec![("5h".to_string(), 41.0)]),
-            ("Codex", None, vec![("weekly".to_string(), 1.0)]),
+            ("Claude", "default", vec![("5h".to_string(), 0.0), ("weekly".to_string(), 93.0)]),
+            ("Claude", "work", vec![("5h".to_string(), 41.0)]),
+            ("Codex", "default", vec![("weekly".to_string(), 1.0)]),
+            ("Codex", "work", vec![("5h".to_string(), 7.0)]),
         ]);
         assert_eq!(to_json(&l)[0]["windows"][1]["used"], 93.0);
-        assert_eq!((&to_json(&l)[1]["profile"], &to_json(&l)[2]["profile"]), (&json!("work"), &Value::Null));
+        assert_eq!((&to_json(&l)[1]["profile"], &to_json(&l)[2]["profile"]), (&json!("work"), &json!("default")));
         assert_eq!(to_json(&l)[2]["windows"][0]["reset"], "1h");
-        assert!(line(&l).contains("   Claude work 5h 41%"), "{}", line(&l));
+        assert!(line(&l).contains("   Claude work 5h 41%") && line(&l).ends_with("   Codex work 5h 7%"), "{}", line(&l));
         #[cfg(target_os = "macos")]
         assert_eq!(path_hash(Path::new("abc")).as_deref(), Some("ba7816bf"));
         assert_eq!(until(now() + 34 * 3600 + 60), "1d 10h");
@@ -445,15 +461,16 @@ mod tests {
         }}}).to_string();
         let rollout = day.join("rollout-a.jsonl");
         fs::write(&rollout, log("1970-01-01T00:00:00Z")).unwrap();
-        let used = || codex(&home).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        let used = || codex(&home, "default", &dir).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
+        let cache = codex_cache(&home, "default");
         let api = json!({"rate_limit": {
             "primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_at": null},
             "secondary_window": {"used_percent": 3, "limit_window_seconds": 604800, "reset_at": now() + 7200}
         }});
-        save_codex_usage(&home, &api, &json!("a")).unwrap();
+        save_codex_usage(&home, &cache, &api, &json!("a")).unwrap();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 3.0)]);
         for invalid in [json!({}), json!({"rate_limit": {"primary_window": {"used_percent": -1, "limit_window_seconds": 18000}}})] {
-            assert!(save_codex_usage(&home, &invalid, &json!("a")).is_err());
+            assert!(save_codex_usage(&home, &cache, &invalid, &json!("a")).is_err());
             assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 3.0)]);
         }
         fs::write(dir.join("auth.json"), auth("b")).unwrap();
