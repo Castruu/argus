@@ -48,7 +48,13 @@ A Claude session's pull request comes from its own transcript, so the number and
 
 ## Install on Mac
 
-For a packaged release, download the DMG for your Mac from [GitHub Releases](https://github.com/Castruu/cc-sessions-viewer/releases). The first package targets Apple Silicon on macOS 14 or later. Open the disk image, drag **CC Sessions Viewer** to **Applications**, then open the app and hover over the notch. macOS may ask for Automation permission when you select a terminal session.
+```sh
+curl -fsSL https://raw.githubusercontent.com/Castruu/cc-sessions-viewer/main/install.sh | sh
+```
+
+This needs an Apple Silicon Mac on macOS 14 or later. It downloads the latest [release](https://github.com/Castruu/cc-sessions-viewer/releases), copies **CC Sessions Viewer** to **Applications**, replacing any earlier copy, and opens it. Hover over the notch. macOS may ask for Automation permission when you select a terminal session.
+
+The app is not notarized by Apple. The installer avoids the Gatekeeper warning because `curl` downloads are not quarantined. If you download the DMG in a browser instead, macOS blocks the first launch; allow it under System Settings → Privacy & Security → Open Anyway.
 
 The app has no Dock icon or menu. It starts at login after its first launch from Applications; turn that off in System Settings → General → Login Items. To quit it, use Activity Monitor or `killall notch`.
 

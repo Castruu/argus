@@ -19,4 +19,9 @@ test "$(env HOME="$work/user" CODEX_HOME="$work/user/.codex" "$app/Contents/MacO
 "$app/Contents/MacOS/notch" --snapshot "$work/snapshots"
 test -s "$work/snapshots/notch-open.png"
 test -s "$work/snapshots/notch-finished.png"
+# install.sh against this image, into a scratch folder and without launching anything
+mkdir "$work/Installed"
+sed -e "s#https://[^ ]*\\.dmg#file://$(cd "$(dirname "$image")" && pwd)/$(basename "$image")#" \
+    -e "s#/Applications/#$work/Installed/#g" -e '/^pkill /d' -e '/^open /d' "$(dirname "$0")/../install.sh" | sh
+codesign --verify --deep --strict "$work/Installed/CC Sessions Viewer.app"
 echo "Packaged app and helper passed smoke tests"

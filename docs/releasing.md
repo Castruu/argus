@@ -4,6 +4,19 @@ Run these commands from the repository root on the Mac used for signing. The pac
 
 For a local packaging check, run `./package.sh --preview`. The resulting `build/*-preview.dmg` uses an ad hoc signature and is only for local testing. Run `tests/PackageTests.sh build/*-preview.dmg` with a single image to mount it, copy the app, verify the signature, and run the packaged helper and sample overlay.
 
+## Release without an Apple Developer ID
+
+Releases are currently ad hoc signed, not notarized, and installed with `install.sh`, which downloads the asset named `CC-Sessions-Viewer-arm64.dmg` from the latest release. From the release commit:
+
+```sh
+./package.sh --preview
+tests/PackageTests.sh build/*-preview.dmg
+cp build/*-preview.dmg build/CC-Sessions-Viewer-arm64.dmg
+gh release upload v<version> build/CC-Sessions-Viewer-arm64.dmg --clobber
+```
+
+Then publish the draft. The rest of this page is for a notarized release, which needs the paid Apple Developer Program.
+
 ## One-time Apple setup
 
 1. Create or import a **Developer ID Application** certificate and its matching private key in the login Keychain. Run `security find-identity -v -p codesigning` and copy the full identity name. [Apple’s certificate instructions](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
