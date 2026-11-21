@@ -50,6 +50,8 @@ A Claude session's pull request comes from its own transcript, so the number and
 
 For a packaged release, download the DMG for your Mac from [GitHub Releases](https://github.com/Castruu/cc-sessions-viewer/releases). The first package targets Apple Silicon on macOS 14 or later. Open the disk image, drag **CC Sessions Viewer** to **Applications**, then open the app and hover over the notch. macOS may ask for Automation permission when you select a terminal session.
 
+The app has no Dock icon or menu. It starts at login after its first launch from Applications; turn that off in System Settings → General → Login Items. To quit it, use Activity Monitor or `killall notch`.
+
 The installed app includes the CLI at `/Applications/CC Sessions Viewer.app/Contents/MacOS/ccs`. Summaries are opt-in. To use the packaged Claude summary hook, use this JSON field in the Stop hook configuration below (for Codex, append ` codex` after the closing single quote):
 
 ```json
@@ -113,7 +115,7 @@ Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude
 Each directory is a profile, named after its folder (`default` for `~/.claude` and `~/.codex`); a Claude and a Codex directory with the same folder name are one profile. When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions, or `all`. The pick is remembered. The usage footer shows the picked profile's limits, or every profile's while `all` is picked, with the profile named (`Claude work 5h`). The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
 
 ```
-~/.moirai/homes/claude/personal
+~/.claude-work
 ```
 
 ## Session start and end hooks
