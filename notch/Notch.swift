@@ -1,4 +1,4 @@
-// Notch overlay: hover the notch to see active Claude Code / Codex sessions (data from `ccs --json`).
+// Notch overlay: hover the notch to see active Claude Code / Codex sessions (data from `argus --json`).
 import AppKit
 import ServiceManagement
 import SwiftUI
@@ -8,13 +8,13 @@ struct Session: Decodable, Identifiable, Equatable {
     var hookID: String { "\(tool)/\(id)" }
     let idle_secs: Int
     let summary, tty: String?
-    // optional so older ccs output still decodes
+    // optional so older argus output still decodes
     var needs, stale, dirty: Bool?
     var branch, waiting_for: String?
     var pr: PR?
-    var pr_open_url: String? // supplied by ccs after host, path and PR number validation
+    var pr_open_url: String? // supplied by argus after host, path and PR number validation
     var app: String? // bundle of the terminal or editor the session runs in
-    var profile: String? // config dir: "default" for ~/.claude or ~/.codex, else the dir's name; nil from older ccs
+    var profile: String? // config dir: "default" for ~/.claude or ~/.codex, else the dir's name; nil from older argus
 }
 
 /// Sessions of one profile (and any without one). A profile with no session left, or none picked, shows everything.
@@ -151,7 +151,7 @@ func focus(_ s: Session) {
 // Both providers deliver hook_event_name and session_id on stdin, before the process exits.
 enum SessionHook: String, Decodable, CaseIterable {
     case start = "SessionStart", end = "SessionEnd"
-    var notification: Notification.Name { .init("com.github.castruu.cc-sessions-viewer." + rawValue) }
+    var notification: Notification.Name { .init("com.github.castruu.argus." + rawValue) }
 
     struct Input: Decodable {
         let hook_event_name: SessionHook
@@ -195,8 +195,8 @@ final class Store: ObservableObject {
         timer?.tolerance = 0.5
     }
     var events: FSEventStreamRef?
-    let ccs: String = ProcessInfo.processInfo.environment["CCS_BIN"]
-        ?? binDir.appendingPathComponent("ccs").path
+    let argus: String = ProcessInfo.processInfo.environment["ARGUS_BIN"]
+        ?? binDir.appendingPathComponent("argus").path
 
     init(sample: [Session], finished: Session? = nil) { sessions = sample; self.finished = finished; repoNames = Set(sample.map(\.repo)).sorted() }
 
@@ -207,19 +207,19 @@ final class Store: ObservableObject {
             }
         }
         // File events drive updates: Claude rewrites a session file when its status changes, and the hooks
-        // write into ~/.cache/ccs. So a turn ending shows up at once and an idle machine does no work.
+        // write into ~/.cache/argus. So a turn ending shows up at once and an idle machine does no work.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        try? FileManager.default.createDirectory(atPath: home + "/.cache/ccs", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        // other Claude and Codex profile dirs (CLAUDE_CONFIG_DIR, CODEX_HOME), the same lists ccs scans
+        try? FileManager.default.createDirectory(atPath: home + "/.cache/argus", withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // other Claude and Codex profile dirs (CLAUDE_CONFIG_DIR, CODEX_HOME), the same lists argus scans
         let listed = ["claude-dirs", "codex-dirs"].flatMap { list in
-            ((try? String(contentsOfFile: home + "/.config/ccs/" + list, encoding: .utf8)) ?? "").split(separator: "\n")
+            ((try? String(contentsOfFile: home + "/.config/argus/" + list, encoding: .utf8)) ?? "").split(separator: "\n")
                 .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
                 .map { ($0 as NSString).expandingTildeInPath + "/sessions" }
         }
-        let dirs = [home + "/.claude/sessions", home + "/.cache/ccs", home + "/.codex/sessions"] + listed
+        let dirs = [home + "/.claude/sessions", home + "/.cache/argus", home + "/.codex/sessions"] + listed
         var ctx = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         events = FSEventStreamCreate(nil, { _, info, _, paths, _, _ in
-            // ccs's own cache and the temp files are not news
+            // argus's own cache and the temp files are not news
             let paths = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
             guard paths.contains(where: { !$0.hasSuffix("cache.json") && !$0.hasSuffix(".tmp") && !$0.hasSuffix(".stamp") }) else { return }
             Unmanaged<Store>.fromOpaque(info!).takeUnretainedValue().refresh()
@@ -258,19 +258,19 @@ final class Store: ObservableObject {
     func refresh(fetchLimits: Bool = false) {
         fetchLimitsPending = fetchLimitsPending || fetchLimits
         guard !paused else { return }
-        guard !running else { again = true; return } // one ccs at a time; run once more when it is done
+        guard !running else { again = true; return } // one argus at a time; run once more when it is done
         running = true
-        let ccs = self.ccs
+        let argus = self.argus
         let limitsArgs = ["--limits", "--json"] + (fetchLimitsPending ? ["--refresh"] : [])
         fetchLimitsPending = false
         DispatchQueue.global().async {
-            let sessions = try? JSONDecoder().decode([Session].self, from: run(ccs, ["--json"]))
-            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(ccs, limitsArgs))
+            let sessions = try? JSONDecoder().decode([Session].self, from: run(argus, ["--json"]))
+            let limits = try? JSONDecoder().decode([ToolLimits].self, from: run(argus, limitsArgs))
             DispatchQueue.main.async {
                 self.running = false
                 if let limits, self.limits != limits { self.limits = limits }
                 if let sessions {
-                    // The end hook can arrive while ccs still sees an open transcript.
+                    // The end hook can arrive while argus still sees an open transcript.
                     self.ended.formIntersection(sessions.map(\.hookID))
                     self.update(sessions.filter { !self.ended.contains($0.hookID) })
                 }
@@ -300,7 +300,7 @@ final class Store: ObservableObject {
     }
 }
 
-/// `ccs --limits --json`: per tool, each usage window (5h, weekly, ...).
+/// `argus --limits --json`: per tool, each usage window (5h, weekly, ...).
 struct ToolLimits: Decodable, Equatable {
     struct Window: Decodable, Equatable {
         let label: String
@@ -309,7 +309,7 @@ struct ToolLimits: Decodable, Equatable {
     }
     let tool: String
     let windows: [Window]
-    var profile: String? // profile these limits belong to; nil from older ccs
+    var profile: String? // profile these limits belong to; nil from older argus
 }
 
 /// Footer limits: the `picked` profile's when it has sessions, else every profile's.
@@ -364,7 +364,7 @@ struct NotchView: View {
                 if shown.isEmpty {
                     Text("No active sessions").foregroundStyle(.secondary)
                 }
-                // ccs output is already sorted by repo, so consecutive grouping keeps that order
+                // argus output is already sorted by repo, so consecutive grouping keeps that order
                 let cols = columns(repos)
                 let maxW = room - 36
                 if CGFloat(repos.count) * (colW + 18) - 18 > maxW {

@@ -40,15 +40,15 @@ fn codex_profiles(home: &Path) -> Vec<(String, PathBuf)> {
 
 /// Our usage cache for a Codex profile.
 fn codex_cache(home: &Path, name: &str) -> PathBuf {
-    home.join(".cache/ccs").join(if name == "default" { "codex-limits.json".to_string() } else { format!("codex-limits-{name}.json") })
+    home.join(".cache/argus").join(if name == "default" { "codex-limits.json".to_string() } else { format!("codex-limits-{name}.json") })
 }
 
 /// A profile's Claude Code state file and our usage cache. `~/.claude` keeps its state beside it, in `~/.claude.json`.
 fn claude_files(home: &Path, name: &str, dir: &Path) -> (PathBuf, PathBuf) {
     if dir == home.join(".claude") {
-        (home.join(".claude.json"), home.join(".cache/ccs/claude-limits.json"))
+        (home.join(".claude.json"), home.join(".cache/argus/claude-limits.json"))
     } else {
-        (dir.join(".claude.json"), home.join(format!(".cache/ccs/claude-limits-{name}.json")))
+        (dir.join(".claude.json"), home.join(format!(".cache/argus/claude-limits-{name}.json")))
     }
 }
 
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn finds_newest_limits_across_chunks_and_beyond_16_mb() {
-        let path = std::env::temp_dir().join(format!("ccs-tail-{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!("argus-tail-{}.jsonl", std::process::id()));
         let limits = |p: f64| json!({"payload": {"rate_limits": {"primary": {"used_percent": p}}}}).to_string();
         let filler = format!("{}\n", json!({"payload": {"text": "x".repeat(1000)}}));
         for suffix in [String::new(), "x".repeat(256 * 1024 - 20), filler.repeat(17_000)] {
@@ -358,19 +358,19 @@ mod tests {
 
     #[test]
     fn reads_both_tools_and_flags_the_tightest_window() {
-        let home = std::env::temp_dir().join(format!("ccs-limits-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("argus-limits-{}", std::process::id()));
         let day = home.join(".codex/sessions/2026/11/17");
         fs::create_dir_all(&day).unwrap();
         // a second profile keeps its state in its own config dir, and its fetched usage in its own cache file
         fs::create_dir_all(home.join("work")).unwrap();
-        fs::create_dir_all(home.join(".config/ccs")).unwrap();
-        fs::write(home.join(".config/ccs/claude-dirs"), "~/work\n~/logged-out\n").unwrap();
+        fs::create_dir_all(home.join(".config/argus")).unwrap();
+        fs::write(home.join(".config/argus/claude-dirs"), "~/work\n~/logged-out\n").unwrap();
         fs::write(home.join("work/.credentials.json"), json!({"claudeAiOauth": {"accessToken": "work-token"}}).to_string()).unwrap();
         assert_eq!(claude_token(&home, &home.join("work")).as_deref(), Some("work-token"));
         save_claude_usage(&home, &claude_files(&home, "work", &home.join("work")).1,
             &json!({"five_hour": {"utilization": 41, "resets_at": "2999-01-01T00:00:00Z"}})).unwrap();
         // the same folder as a Codex home: its own login, fetched usage and cache file
-        fs::write(home.join(".config/ccs/codex-dirs"), "~/work\n").unwrap();
+        fs::write(home.join(".config/argus/codex-dirs"), "~/work\n").unwrap();
         fs::write(home.join("work/auth.json"), json!({"tokens": {"access_token": "fixture", "account_id": "w"}}).to_string()).unwrap();
         save_codex_usage(&home, &codex_cache(&home, "work"), &json!({"rate_limit": {
             "primary_window": {"used_percent": 7, "limit_window_seconds": 18000, "reset_at": null}}}), &json!("w")).unwrap();
@@ -402,10 +402,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_status_line_file() {
-        let home = std::env::temp_dir().join(format!("ccs-limits-fallback-{}", std::process::id()));
-        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        let home = std::env::temp_dir().join(format!("argus-limits-fallback-{}", std::process::id()));
+        fs::create_dir_all(home.join(".cache/argus")).unwrap();
         fs::write(home.join(".claude.json"), "{}").unwrap();
-        fs::write(home.join(".cache/ccs/claude-limits.json"),
+        fs::write(home.join(".cache/argus/claude-limits.json"),
             json!({"seven_day": {"used_percentage": 20, "resets_at": now() + 7200}}).to_string()).unwrap();
         let l = read(&home);
         fs::remove_dir_all(&home).ok();
@@ -414,30 +414,30 @@ mod tests {
 
     #[test]
     fn prefers_fresh_claude_samples_and_keeps_missing_windows() {
-        let home = std::env::temp_dir().join(format!("ccs-limits-fresh-{}", std::process::id()));
-        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        let home = std::env::temp_dir().join(format!("argus-limits-fresh-{}", std::process::id()));
+        fs::create_dir_all(home.join(".cache/argus")).unwrap();
         let cache = |at| json!({"cachedUsageUtilization": {"fetchedAtMs": at, "utilization": {
             "five_hour": {"utilization": 38, "resets_at": "1970-01-01T00:00:00Z"},
             "seven_day": {"utilization": 98, "resets_at": "2999-01-01T00:00:00Z"}
         }}}).to_string();
         fs::write(home.join(".claude.json"), cache(1)).unwrap();
-        fs::write(home.join(".cache/ccs/claude-limits.json"),
+        fs::write(home.join(".cache/argus/claude-limits.json"),
             json!({"seven_day": {"used_percentage": 100, "resets_at": now() + 7200}}).to_string()).unwrap();
         let used = || claude(&home, "default", &home.join(".claude")).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
         fs::write(home.join(".claude.json"), cache((now() + 60) * 1000)).unwrap();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
-        fs::write(home.join(".cache/ccs/claude-limits.json"), "invalid").unwrap();
+        fs::write(home.join(".cache/argus/claude-limits.json"), "invalid").unwrap();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 98.0)]);
         fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
     fn caches_live_usage_without_erasing_it_on_invalid_responses() {
-        let home = std::env::temp_dir().join(format!("ccs-live-usage-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("argus-live-usage-{}", std::process::id()));
         let live = json!({"five_hour": {"utilization": 0, "resets_at": null},
             "seven_day": {"utilization": 100, "resets_at": "2999-01-01T00:00:00Z"}});
-        let cache = home.join(".cache/ccs/claude-limits.json");
+        let cache = home.join(".cache/argus/claude-limits.json");
         save_claude_usage(&home, &cache, &live).unwrap();
         let used = || claude(&home, "default", &home.join(".claude")).iter().map(|w| (w.label.clone(), w.used)).collect::<Vec<_>>();
         assert_eq!(used(), [("5h".into(), 0.0), ("weekly".into(), 100.0)]);
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn codex_api_cache_keeps_windows_and_yields_to_newer_events_or_account_switches() {
-        let home = std::env::temp_dir().join(format!("ccs-codex-api-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("argus-codex-api-{}", std::process::id()));
         let dir = home.join(".codex");
         let day = dir.join("sessions/2026/11/17");
         fs::create_dir_all(&day).unwrap();

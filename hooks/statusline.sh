@@ -1,12 +1,12 @@
 #!/bin/sh
-# Claude Code statusLine: saves the account rate limits to ~/.cache/ccs/claude-limits.json
-# (claude-limits-<folder>.json for another CLAUDE_CONFIG_DIR, which is another account) for ccs/notch,
+# Claude Code statusLine: saves the account rate limits to ~/.cache/argus/claude-limits.json
+# (claude-limits-<folder>.json for another CLAUDE_CONFIG_DIR, which is another account) for argus/notch,
 # and prints a short usage line.
 input=$(cat)
-dir="$HOME/.cache/ccs"
+dir="$HOME/.cache/argus"
 umask 077
 [ ! -L "$dir" ] && mkdir -p "$dir" && chmod 700 "$dir" || exit 0
-[ -n "$CCS_STATUSLINE_DEBUG" ] && printf '%s' "$input" > "$dir/statusline-debug.json"
+[ -n "$ARGUS_STATUSLINE_DEBUG" ] && printf '%s' "$input" > "$dir/statusline-debug.json"
 case "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" in
     "$HOME/.claude") file=claude-limits.json ;;
     *) file="claude-limits-$(basename "$CLAUDE_CONFIG_DIR").json" ;;

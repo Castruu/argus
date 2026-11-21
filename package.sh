@@ -16,14 +16,14 @@ fi
 ./build.sh
 version=$(cargo metadata --locked --offline --no-deps --format-version 1 | /usr/bin/plutil -extract packages.0.version raw -o - -)
 arch=$(lipo -archs build/notch)
-[ "$arch" = "$(lipo -archs build/ccs)" ]
+[ "$arch" = "$(lipo -archs build/argus)" ]
 work=$(mktemp -d "$PWD/build/package.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-name='CC Sessions Viewer'
+name='Argus'
 app="$work/image/$name.app"
 contents="$app/Contents"
 mkdir -p "$contents/MacOS" "$contents/Resources/hooks"
-cp build/notch build/ccs "$contents/MacOS/"
+cp build/notch build/argus "$contents/MacOS/"
 cp notch/*.applescript LICENSE notch/ProviderIcons-LICENSE "$contents/Resources/"
 cp hooks/*.sh "$contents/Resources/hooks/"
 iconset="$work/AppIcon.iconset"
@@ -39,7 +39,7 @@ cat > "$contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key><string>com.github.castruu.cc-sessions-viewer</string>
+    <key>CFBundleIdentifier</key><string>com.github.castruu.argus</string>
     <key>CFBundleName</key><string>$name</string>
     <key>CFBundleExecutable</key><string>notch</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -54,16 +54,16 @@ cat > "$contents/Info.plist" <<PLIST
 </plist>
 PLIST
 plutil -lint "$contents/Info.plist"
-codesign --force --sign "$identity" "$timestamp" --options runtime "$contents/MacOS/ccs"
+codesign --force --sign "$identity" "$timestamp" --options runtime "$contents/MacOS/argus"
 codesign --force --sign "$identity" "$timestamp" --options runtime --entitlements packaging/automation.entitlements "$app"
 codesign --verify --deep --strict "$app"
 
-file="CC-Sessions-Viewer-$version-$arch$suffix.dmg"
+file="Argus-$version-$arch$suffix.dmg"
 image="$work/$file"
 hdiutil create -quiet -volname "$name" -format UDZO -fs HFS+ -srcfolder "$work/image" "$image"
 if [ -z "$suffix" ]; then
-    codesign --sign "$identity" --timestamp --identifier com.github.castruu.cc-sessions-viewer.dmg "$image"
-    xcrun notarytool submit "$image" --keychain-profile "${NOTARY_PROFILE:-cc-sessions-viewer}" --wait --output-format json > "$work/notary.json" || {
+    codesign --sign "$identity" --timestamp --identifier com.github.castruu.argus.dmg "$image"
+    xcrun notarytool submit "$image" --keychain-profile "${NOTARY_PROFILE:-argus}" --wait --output-format json > "$work/notary.json" || {
         cat "$work/notary.json" >&2
         exit 1
     }

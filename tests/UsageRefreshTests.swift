@@ -6,7 +6,7 @@ import Foundation
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let log = dir.appendingPathComponent("calls")
-        let ccs = dir.appendingPathComponent("ccs")
+        let argus = dir.appendingPathComponent("argus")
         let snapshot = dir.appendingPathComponent("sessions.json")
         let rows = ["claude", "codex"].map { tool in
             ["tool": tool, "id": "shared", "title": "Test", "project": "r", "repo": "r",
@@ -22,10 +22,10 @@ import Foundation
           cat "\(snapshot.path)"
         fi
         """
-        try script.write(to: ccs, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ccs.path)
-        setenv("CCS_BIN", ccs.path, 1)
-        defer { unsetenv("CCS_BIN") }
+        try script.write(to: argus, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: argus.path)
+        setenv("ARGUS_BIN", argus.path, 1)
+        defer { unsetenv("ARGUS_BIN") }
         let store = Store(sample: [])
 
         func finishRefresh() {

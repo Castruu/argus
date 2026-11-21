@@ -1,5 +1,5 @@
-//! ccs: list active Claude Code and Codex sessions.
-//! Usage: ccs [--json] [--watch] | ccs --limits [--json] [--refresh]
+//! argus: list active Claude Code and Codex sessions.
+//! Usage: argus [--json] [--watch] | argus --limits [--json] [--refresh]
 mod cache;
 mod limits;
 mod pr;
@@ -232,8 +232,8 @@ fn scan_transcript(path: &Path, entry: &mut Value) {
 }
 
 fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Session> {
-    // ~/.cache/ccs/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
-    let cache_path = home.join(".cache/ccs/cache.json");
+    // ~/.cache/argus/cache.json keeps transcript and git results between runs, so an unchanged session costs nothing
+    let cache_path = home.join(".cache/argus/cache.json");
     let old: Value = fs::read_to_string(&cache_path).ok().and_then(|t| serde_json::from_str(&t).ok())
         .filter(|v: &Value| v["v"] == 5 && v["t"].is_object() && v["git"].is_object()) // v5: replay Codex turn start times
         .unwrap_or_else(|| json!({"v": 5, "t": {}, "git": {}}));
@@ -265,7 +265,7 @@ fn collect(home: &Path, codex_open: &[(PathBuf, u64)], procs: &Procs) -> Vec<Ses
         // shortcut: ambiguous dialogs stay quiet, add explicit request reasons when Claude exposes them.
         s.needs = !s.stale && s.status == "waiting" && matches!(s.waiting_for.as_deref(),
             Some("permission" | "permission prompt" | "input needed" | "sandbox request" | "worker request" | "goal proposal"));
-        let path = home.join(".cache/ccs").join(format!("{}.txt", s.id));
+        let path = home.join(".cache/argus").join(format!("{}.txt", s.id));
         s.summary = fs::read_to_string(&path)
             .ok()
             .map(|t| t.trim().to_string())
@@ -300,20 +300,20 @@ fn read_jsonl(path: &Path, keep: impl Fn(&str) -> bool) -> impl Iterator<Item = 
 }
 
 /// Profiles as (name, dir). "default" is the tool's usual dir and comes first; the rest are the dirs listed
-/// one per line in ~/.config/ccs/<list>, named after their folder. Claude and Codex dirs with the same folder
+/// one per line in ~/.config/argus/<list>, named after their folder. Claude and Codex dirs with the same folder
 /// name are one profile.
 fn profiles(home: &Path, list: &str, default: &str) -> Vec<(String, PathBuf)> {
-    let listed = fs::read_to_string(home.join(".config/ccs").join(list)).unwrap_or_default();
+    let listed = fs::read_to_string(home.join(".config/argus").join(list)).unwrap_or_default();
     let listed = listed.lines().map(str::trim).filter(|l| !l.is_empty())
         .map(|l| l.strip_prefix("~/").map_or_else(|| PathBuf::from(l), |rest| home.join(rest)))
         .map(|dir| (dir.file_name().map_or("?".into(), |n| n.to_string_lossy().into_owned()), dir));
     std::iter::once(("default".to_string(), home.join(default))).chain(listed).collect()
 }
 
-/// `~/.claude` and the CLAUDE_CONFIG_DIR dirs in ~/.config/ccs/claude-dirs.
+/// `~/.claude` and the CLAUDE_CONFIG_DIR dirs in ~/.config/argus/claude-dirs.
 fn claude_profiles(home: &Path) -> Vec<(String, PathBuf)> { profiles(home, "claude-dirs", ".claude") }
 
-/// `~/.codex` and the CODEX_HOME dirs in ~/.config/ccs/codex-dirs.
+/// `~/.codex` and the CODEX_HOME dirs in ~/.config/argus/codex-dirs.
 fn codex_profiles(home: &Path) -> Vec<(String, PathBuf)> { profiles(home, "codex-dirs", ".codex") }
 
 fn claude_sessions(home: &Path, procs: &Procs, cache: &mut Value) -> Vec<Session> {
@@ -401,10 +401,10 @@ fn validate_pr(home: &Path, pr: &mut Value) {
 }
 
 /// Cached PR for `url` if given, else for the branch checked out in `cwd`, or null. GitHub is slow, so when the cache is older than
-/// PR_TTL this starts `ccs --fetch-pr` in the background and returns what it has; the next run sees the result.
+/// PR_TTL this starts `argus --fetch-pr` in the background and returns what it has; the next run sees the result.
 fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
     let key = url.unwrap_or(cwd).replace(['/', ':'], "-");
-    let path = home.join(".cache/ccs").join(format!("pr{key}.json"));
+    let path = home.join(".cache/argus").join(format!("pr{key}.json"));
     let age = fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
     if age.is_none_or(|a| a.as_secs() > PR_TTL) {
         // mark the attempt first, so a slow or failing lookup is not started again on the next refresh
@@ -423,7 +423,7 @@ fn pr_state(home: &Path, cwd: &str, url: Option<&str>) -> Value {
     pr
 }
 
-/// `ccs --fetch-pr <cwd> <out> [url]`: asks `gh` for that PR (or the current branch's) and writes it (or null) to <out>.
+/// `argus --fetch-pr <cwd> <out> [url]`: asks `gh` for that PR (or the current branch's) and writes it (or null) to <out>.
 fn fetch_pr(cwd: &str, out: &Path, url: Option<&str>) {
     if url.is_some_and(|u| pr::number(u, &home()).is_none()) { return; }
     // launchd starts the overlay without Homebrew on PATH
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn streams_spaced_json_and_retries_partial_transcript_lines() {
-        let home = env::temp_dir().join(format!("ccs-stream-{}", std::process::id()));
+        let home = env::temp_dir().join(format!("argus-stream-{}", std::process::id()));
         fs::create_dir_all(home.join(".codex")).unwrap();
         let claude = home.join("claude.jsonl");
         let body = [
@@ -694,12 +694,12 @@ mod tests {
 
     #[test]
     fn claude_needs_only_explicit_pending_requests() {
-        let home = env::temp_dir().join(format!("ccs-needs-{}", std::process::id()));
+        let home = env::temp_dir().join(format!("argus-needs-{}", std::process::id()));
         let registry = home.join(".claude/sessions/1.json");
         let transcript = home.join(".claude/projects/test/pending.jsonl");
         fs::create_dir_all(registry.parent().unwrap()).unwrap();
         fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        fs::create_dir_all(home.join(".cache/ccs")).unwrap();
+        fs::create_dir_all(home.join(".cache/argus")).unwrap();
         fs::write(&transcript, concat!(
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Ship it?"}]}}"#, "\n",
             r#"{"type":"user","message":{"content":"<command-name>/usage</command-name>"}}"#, "\n",
@@ -725,13 +725,13 @@ mod tests {
                 "pid": 1, "sessionId": "pending", "cwd": home, "status": status,
                 "waitingFor": reason, "statusUpdatedAt": if stale { 0 } else { now() * 1000 },
             }).to_string()).unwrap();
-            fs::write(home.join(".cache/ccs/pending.txt"),
+            fs::write(home.join(".cache/argus/pending.txt"),
                 if needs { "DONE: Old summary" } else { "WAIT: Old question" }).unwrap();
             let sessions = collect(&home, &[], &procs);
             assert_eq!(sessions[0].needs, needs, "{status}, {reason:?}, stale={stale}");
             assert_eq!(sessions[0].summary.as_deref(), Some(if needs { "Old summary" } else { "Old question" }));
             // A cached question flag from an older build must never restore the heuristic.
-            let path = home.join(".cache/ccs/cache.json");
+            let path = home.join(".cache/argus/cache.json");
             let mut cache: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             cache["t"]["pending"]["asks"] = true.into();
             fs::write(path, cache.to_string()).unwrap();
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn codex_status_follows_turn_events_not_file_activity() {
-        let home = env::temp_dir().join(format!("ccs-lifecycle-{}", std::process::id()));
+        let home = env::temp_dir().join(format!("argus-lifecycle-{}", std::process::id()));
         fs::create_dir_all(&home).unwrap();
         let path = home.join("rollout.jsonl");
         let open = [(path.clone(), 0)];
@@ -753,7 +753,7 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"cx","source":"cli"}}"#, "\n",
             r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#, "\n",
         )).unwrap();
-        let cache_path = home.join(".cache/ccs/cache.json");
+        let cache_path = home.join(".cache/argus/cache.json");
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut legacy = json!({"v": 3, "t": {}, "git": {}});
         legacy["t"][path.to_string_lossy().as_ref()] = json!({
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn codex_working_time_survives_tool_writes_and_cached_refreshes() {
-        let home = env::temp_dir().join(format!("ccs-timing-{}", std::process::id()));
+        let home = env::temp_dir().join(format!("argus-timing-{}", std::process::id()));
         fs::create_dir_all(&home).unwrap();
         let path = home.join("rollout.jsonl");
         let open = [(path.clone(), 0)];
@@ -805,7 +805,7 @@ mod tests {
         let started = now() - 120;
         append(json!({"type":"task_started","turn_id":"one","started_at":started}));
         // An already-cached running turn must recover its start without another task_started event.
-        let cache_path = home.join(".cache/ccs/cache.json");
+        let cache_path = home.join(".cache/argus/cache.json");
         fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         let mut legacy = json!({"v": 4, "t": {}, "git": {}});
         legacy["t"][path.to_string_lossy().as_ref()] = json!({
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn reads_claude_and_codex_fixtures() {
-        let home = env::temp_dir().join(format!("ccs-test-{}", std::process::id()));
+        let home = env::temp_dir().join(format!("argus-test-{}", std::process::id()));
         let w = |p: &str, c: &str| {
             let f = home.join(p);
             fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -856,7 +856,7 @@ mod tests {
             r#"{"type":"system","cwd":"/x/worktrees/proj"}"#, "\n"));
 
         // a session started with CLAUDE_CONFIG_DIR lives in its own config dir
-        w(".config/ccs/claude-dirs", "~/other-home\n");
+        w(".config/argus/claude-dirs", "~/other-home\n");
         w("other-home/sessions/5.json", &format!(r#"{{"pid":{me},"sessionId":"other","cwd":"/x/proj","status":"idle","updatedAt":0}}"#));
         w("other-home/projects/-x-proj/other.jsonl", concat!(r#"{"type":"ai-title","aiTitle":"Elsewhere"}"#, "\n"));
 
@@ -864,15 +864,15 @@ mod tests {
             r#"{"type":"session_meta","payload":{"id":"cx1","cwd":"/y/api","source":"cli"}}"#, "\n",
             r#"{"type":"turn_context","payload":{"cwd":"/y/worktrees/api"}}"#, "\n",
             r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add tests"}]}}"#, "\n"));
-        w(".config/ccs/codex-dirs", "~/other-home\n");
+        w(".config/argus/codex-dirs", "~/other-home\n");
         w("other-home/sessions/2026/01/01/rollout-2.jsonl", concat!(r#"{"type":"session_meta","payload":{"id":"cx2","cwd":"/y/api","source":"cli"}}"#, "\n"));
         w("other-home/session_index.jsonl", r#"{"id":"cx2","thread_name":"Other Codex"}"#);
         w(".codex/sessions/2026/01/01/rollout-closed.jsonl", r#"{"type":"session_meta","payload":{"id":"gone","cwd":"/z","source":"cli"}}"#);
         w(".codex/sessions/2026/01/01/rollout-exec.jsonl", r#"{"type":"session_meta","payload":{"id":"ex","cwd":"/z","source":"exec"}}"#);
         w(".codex/session_index.jsonl", r#"{"id":"cx1","thread_name":"API tests"}"#);
-        w(".cache/ccs/abc.txt", "Fixing the login bug\n");
-        w(".cache/ccs/fresh.txt", "DONE: Tests pass\n");
-        w(".cache/ccs/cx1.txt", "Adding API tests\n");
+        w(".cache/argus/abc.txt", "Fixing the login bug\n");
+        w(".cache/argus/fresh.txt", "DONE: Tests pass\n");
+        w(".cache/argus/cx1.txt", "Adding API tests\n");
 
         let rollouts = home.join(".codex/sessions/2026/01/01");
         // rollout-closed is not open; rollout-1 is held by a desktop-app server (no tty) and the CLI (tty)
@@ -895,7 +895,7 @@ mod tests {
         let again = collect(&home, &open, &procs);
         let a = again.iter().find(|s| s.id == "abc").unwrap();
         assert_eq!((a.title.as_str(), a.last_prompt.as_str()), ("Fix login v2", "first ask"));
-        let cache: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/ccs/cache.json")).unwrap()).unwrap();
+        let cache: Value = serde_json::from_str(&fs::read_to_string(home.join(".cache/argus/cache.json")).unwrap()).unwrap();
         let codex_path = rollouts.join("rollout-1.jsonl");
         assert_eq!(cache["t"][codex_path.to_string_lossy().as_ref()]["len"], fs::metadata(&codex_path).unwrap().len(),
             "keep the Codex transcript offset between refresh processes");

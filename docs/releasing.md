@@ -6,13 +6,13 @@ For a local packaging check, run `./package.sh --preview`. The resulting `build/
 
 ## Release without an Apple Developer ID
 
-Releases are currently ad hoc signed, not notarized, and installed with `install.sh`, which downloads the asset named `CC-Sessions-Viewer-arm64.dmg` from the latest release. From the release commit:
+Releases are currently ad hoc signed, not notarized, and installed with `install.sh`, which downloads the asset named `Argus-arm64.dmg` from the latest release. From the release commit:
 
 ```sh
 ./package.sh --preview
 tests/PackageTests.sh build/*-preview.dmg
-cp build/*-preview.dmg build/CC-Sessions-Viewer-arm64.dmg
-gh release upload v<version> build/CC-Sessions-Viewer-arm64.dmg --clobber
+cp build/*-preview.dmg build/Argus-arm64.dmg
+gh release upload v<version> build/Argus-arm64.dmg --clobber
 ```
 
 Then publish the draft. The rest of this page is for a notarized release, which needs the paid Apple Developer Program.
@@ -20,7 +20,7 @@ Then publish the draft. The rest of this page is for a notarized release, which 
 ## One-time Apple setup
 
 1. Create or import a **Developer ID Application** certificate and its matching private key in the login Keychain. Run `security find-identity -v -p codesigning` and copy the full identity name. [Apple’s certificate instructions](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/)
-2. Run `xcrun notarytool store-credentials cc-sessions-viewer` and enter your credentials at the interactive prompts. This saves the notarization profile in Keychain. [Apple’s notarization guide](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+2. Run `xcrun notarytool store-credentials argus` and enter your credentials at the interactive prompts. This saves the notarization profile in Keychain. [Apple’s notarization guide](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 
 ## Build and publish
 

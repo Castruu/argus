@@ -6,7 +6,7 @@ use std::{
 };
 
 pub fn prepare(home: &Path) -> io::Result<()> {
-    let dir = home.join(".cache/ccs");
+    let dir = home.join(".cache/argus");
     DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
     let meta = fs::symlink_metadata(&dir)?;
     if !meta.is_dir() {
@@ -31,8 +31,8 @@ mod tests {
     use super::*;
     #[test]
     fn locks_existing_cache_and_creates_private_files() {
-        let home = std::env::temp_dir().join(format!("ccs-cache-mode-{}", std::process::id()));
-        let dir = home.join(".cache/ccs");
+        let home = std::env::temp_dir().join(format!("argus-cache-mode-{}", std::process::id()));
+        let dir = home.join(".cache/argus");
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         prepare(&home).unwrap();

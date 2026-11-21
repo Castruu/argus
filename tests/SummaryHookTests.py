@@ -13,15 +13,15 @@ HOOK = Path(__file__).resolve().parents[1] / "hooks/summarize.sh"
 
 class SummaryHookTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="ccs-summary-")
+        self.temp = tempfile.TemporaryDirectory(prefix="argus-summary-")
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.transcript = self.home / "rollout.jsonl"
-        self.cache = self.home / ".cache/ccs"
+        self.cache = self.home / ".cache/argus"
         self.output = self.cache / "session-1.txt"
         self.calls = self.home / "calls.jsonl"
         self.env = dict(os.environ, HOME=str(self.home), PATH=f"{self.home}:{os.environ['PATH']}")
-        self.env.pop("CCS_SUMMARIZING", None)
+        self.env.pop("ARGUS_SUMMARIZING", None)
         stub = self.home / "codex"
         stub.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -34,7 +34,7 @@ if not os.getenv('FAIL'):
     else:
         print(output)
 with open(pathlib.Path(os.environ['HOME']) / 'calls.jsonl', 'a') as f:
-    f.write(json.dumps({'args': args, 'text': text, 'cwd': os.getcwd(), 'guard': os.getenv('CCS_SUMMARIZING')}) + '\\n')
+    f.write(json.dumps({'args': args, 'text': text, 'cwd': os.getcwd(), 'guard': os.getenv('ARGUS_SUMMARIZING')}) + '\\n')
 sys.exit(1 if os.getenv('FAIL') else 0)
 """)
         stub.chmod(0o755)
@@ -136,7 +136,7 @@ sys.exit(1 if os.getenv('FAIL') else 0)
         self.invoke()
         self.invoke(session_id="../outside")
         self.write_transcript([self.message("user", "Fix login")])
-        self.env["CCS_SUMMARIZING"] = "1"
+        self.env["ARGUS_SUMMARIZING"] = "1"
         self.invoke(session_id="recursive")
         self.assertFalse(self.calls.exists())
         self.assertFalse((self.home / ".cache/outside.txt").exists())
