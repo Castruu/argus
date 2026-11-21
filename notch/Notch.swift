@@ -310,10 +310,9 @@ struct ToolLimits: Decodable, Equatable {
     var profile: String? // Claude profile these limits belong to; nil for Codex
 }
 
-/// Footer limits: Codex plus one Claude profile, `picked` when it has sessions, else the default.
+/// Footer limits: Codex plus the `picked` Claude profile when it has sessions, else every profile.
 func limits(_ all: [ToolLimits], picked: String, sessions: [Session]) -> [ToolLimits] {
-    let profile = sessions.contains { $0.profile == picked } ? picked : "default"
-    return all.filter { $0.profile == nil || $0.profile == profile }
+    sessions.contains { $0.profile == picked } ? all.filter { $0.profile == nil || $0.profile == picked } : all
 }
 
 func run(_ bin: String, _ args: [String]) -> Data {
@@ -509,7 +508,9 @@ struct NotchView: View {
     }
 
     func limitItems(widest: Bool = false) -> some View {
-        ForEach(shownLimits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
+        // several Claude profiles side by side go by their profile name instead of "Claude"
+        let several = shownLimits.filter { $0.profile != nil }.count > 1
+        return ForEach(shownLimits.flatMap { t in t.windows.map { ("\(several ? t.profile ?? t.tool : t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
             let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
             HStack(spacing: 4) {
                 Text(label)

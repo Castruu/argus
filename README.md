@@ -110,7 +110,7 @@ swiftc -parse-as-library -D NOTCH_TESTS notch/*.swift tests/SummaryPreviewTests.
 
 Sessions started with `CLAUDE_CONFIG_DIR` keep their registry outside `~/.claude`. List those directories in `~/.config/ccs/claude-dirs`, one per line (`~/` is expanded); `~/.claude` is always scanned. Restart the notch after editing the list. Hooks go in each directory's own `settings.json`.
 
-Each directory is a profile, named after its folder (`default` for `~/.claude`). When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions (Codex sessions always show), or `all`. The pick is remembered. The usage footer shows the picked profile's Claude limits, or the default profile's while `all` is picked. The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
+Each directory is a profile, named after its folder (`default` for `~/.claude`). When sessions run under more than one, the open panel shows a chip per profile above the counts; click one to list only its sessions (Codex sessions always show), or `all`. The pick is remembered. The usage footer shows the picked profile's Claude limits, or every profile's while `all` is picked, labelled by profile. The closed notch, the finished banner and the chimes still cover every profile. `ccs --json` reports each session's `profile`.
 
 ```
 ~/.moirai/homes/claude/personal

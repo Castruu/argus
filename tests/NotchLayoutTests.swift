@@ -12,7 +12,7 @@ import SwiftUI
     let usage = ["default", "work", nil].map { ToolLimits(tool: $0 == nil ? "Codex" : "Claude", windows: [], profile: $0) }
     let footer = { (picked: String) in limits(usage, picked: picked, sessions: all).map(\.profile) }
     assert(footer("work") == ["work", nil], "A picked profile shows its own limits beside Codex")
-    assert(footer("") == ["default", nil] && footer("gone") == ["default", nil], "No pick shows the default profile's limits")
+    assert(footer("") == ["default", "work", nil] && footer("gone").count == 3, "No pick shows every profile's limits")
     let picker = { (list: [Session]) in
         ImageRenderer(content: NotchView(store: Store(sample: list), notch: CGSize(width: 190, height: 32), open: true)).nsImage!.size.height
     }
