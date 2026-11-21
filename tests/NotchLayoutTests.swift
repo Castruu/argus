@@ -68,8 +68,12 @@ import SwiftUI
             // the live Codex reset reads "7d" right after a fetch and "6d 23h" a second later
             store.limits[1] = ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 100, reset: "6d 23h")])
             assert(ImageRenderer(content: view).nsImage!.size.height == image.size.height, "Wider usage values should not reflow the footer for \(count) repos")
+            UserDefaults.standard.set(true, forKey: "limitsHidden")
+            let hidden = ImageRenderer(content: view).nsImage!
+            UserDefaults.standard.removeObject(forKey: "limitsHidden")
             store.limits = []
             let withoutLimits = ImageRenderer(content: view).nsImage!
+            assert(hidden.size == withoutLimits.size, "The limits toggle should hide the footer for \(count) repos")
             assert(image.size.height > withoutLimits.size.height, "Footer is missing for \(count) repos")
             if count >= 3 {
                 assert(image.size.height - withoutLimits.size.height < 28, "All three limits should fit on one row for \(count) repos")

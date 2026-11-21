@@ -32,7 +32,7 @@ web-app
 
 - `ccs`: list sessions (`--watch` to refresh, `--json` for tools)
 - `ccs --limits`: Claude 5h/weekly and Codex usage from local caches. Add `--refresh` to fetch current limits with your existing Claude Code and Codex logins. With the default Cool palette, a bar turns violet at 80% and coral at 95%.
-- `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows. Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
+- `notch`: macOS overlay; hover the notch to see sessions. Usage limits sit below the sessions with inline bars, percentages and reset times; narrow panels wrap them into rows; click the chart icon in the panel header to hide or show them (remembered). Palettes: Cool (default), Soft, Focus, Vivid. Click the palette icon in the panel header for the next one, right-click to pick; remembered. `--palette <id>` for one run.
 - `hooks/summarize.sh`: Stop hook that writes a one-line AI summary per session (Claude: Haiku; Codex: Luna; at most once per 3 min per session)
 - `hooks/statusline.sh`: optional Claude Code status line; keeps Claude limits fresh between `/usage` cache updates
 

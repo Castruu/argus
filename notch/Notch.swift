@@ -343,6 +343,7 @@ struct NotchView: View {
     @State private var pinned = false // a profile pick resized the panel away from the pointer: stay open until it is hovered again
     @State private var pinTimeout: DispatchWorkItem?
     @AppStorage("notificationSoundsMuted") private var notificationSoundsMuted = false
+    @AppStorage("limitsHidden") private var limitsHidden = false
     var forcedPalette: Palette? = nil // snapshots
     @StateObject var summaryPreview = SummaryPreview()
     var p: Palette { forcedPalette ?? Palette.named(paletteFlag ?? paletteID) }
@@ -372,7 +373,7 @@ struct NotchView: View {
                 } else {
                     cols
                 }
-                if !shownLimits.isEmpty {
+                if !limitsHidden && !shownLimits.isEmpty {
                     limitsFooter.frame(width: contentWidth)
                 }
             } else if let f = store.finished {
@@ -456,6 +457,7 @@ struct NotchView: View {
             count("stale", p.stale) { $0.stale == true }
             Spacer(minLength: 24)
             paletteMenu
+            limitsToggle
             soundToggle
         }.font(.system(size: 11, weight: .semibold))
     }
@@ -543,6 +545,18 @@ struct NotchView: View {
                     }
                 }
             }
+    }
+
+    var limitsToggle: some View {
+        Button { limitsHidden.toggle() } label: {
+            // no slashed chart symbol exists: the hidden state is the same icon, dimmed
+            Image(systemName: "chart.bar")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(limitsHidden ? 0.25 : 0.5))
+        }
+        .buttonStyle(.plain)
+        .help(limitsHidden ? "Show usage limits" : "Hide usage limits")
+        .accessibilityLabel(limitsHidden ? "Show usage limits" : "Hide usage limits")
+        .modifier(Clickable())
     }
 
     var soundToggle: some View {
