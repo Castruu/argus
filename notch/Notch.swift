@@ -1,5 +1,6 @@
 // Notch overlay: hover the notch to see active Claude Code / Codex sessions (data from `ccs --json`).
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 struct Session: Decodable, Identifiable, Equatable {
@@ -692,6 +693,11 @@ struct NotchApp {
         if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
             snapshot(to: CommandLine.arguments[i + 1])
             return
+        }
+        // Start at login by default. Registered once, so turning it off in System Settings sticks;
+        // only from an Applications folder, so a run from the disk image or a source build registers nothing.
+        if Bundle.main.bundlePath.contains("/Applications/"), !UserDefaults.standard.bool(forKey: "loginItemRegistered") {
+            UserDefaults.standard.set((try? SMAppService.mainApp.register()) != nil, forKey: "loginItemRegistered")
         }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
