@@ -61,10 +61,13 @@ import SwiftUI
                 assert(usageShape(narrowImage).bar, "Narrow footers should wrap usage items and keep their bars")
                 assert(narrowImage.size.height > image.size.height, "Narrow footers should wrap when one row cannot fit")
             }
+            // the live Codex reset reads "7d" right after a fetch and "6d 23h" a second later
+            store.limits[1] = ToolLimits(tool: "Codex", windows: [.init(label: "weekly", used: 100, reset: "6d 23h")])
+            assert(ImageRenderer(content: view).nsImage!.size.height == image.size.height, "Wider usage values should not reflow the footer for \(count) repos")
             store.limits = []
             let withoutLimits = ImageRenderer(content: view).nsImage!
             assert(image.size.height > withoutLimits.size.height, "Footer is missing for \(count) repos")
-            if count >= 2 {
+            if count >= 3 {
                 assert(image.size.height - withoutLimits.size.height < 28, "All three limits should fit on one row for \(count) repos")
             }
             assert(CGFloat(usage.top) >= withoutLimits.size.height - 4, "Limits should appear below the sessions")

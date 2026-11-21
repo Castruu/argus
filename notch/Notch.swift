@@ -488,16 +488,19 @@ struct NotchView: View {
 
     var limitsFooter: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) { limitItems }
+            // sized by the widest values it could show: a reset going "7d" -> "6d 23h" must not flip one row into two
+            HStack(spacing: 8) { limitItems(widest: true) }
                 .fixedSize(horizontal: true, vertical: false)
+                .hidden()
+                .overlay(alignment: .leading) { HStack(spacing: 8) { limitItems() }.fixedSize() }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: colW), spacing: 18, alignment: .leading)], alignment: .leading, spacing: 8) {
-                limitItems
+                limitItems()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    var limitItems: some View {
+    func limitItems(widest: Bool = false) -> some View {
         ForEach(store.limits.flatMap { t in t.windows.map { ("\(t.tool) \($0.label)", $0) } }, id: \.0) { label, w in
             let c = w.used >= 95 ? p.failing : w.used >= 80 ? p.warn : .white.opacity(0.6)
             HStack(spacing: 4) {
@@ -506,7 +509,7 @@ struct NotchView: View {
                     Capsule().fill(.white.opacity(0.15))
                     Capsule().fill(c).frame(width: 24 * min(w.used, 100) / 100)
                 }.frame(width: 24, height: 4)
-                Text("\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
+                Text(widest ? "100%" + (w.reset == nil ? "" : " ↻00d 00h") : "\(Int(w.used.rounded()))%" + (w.reset.map { " ↻\($0)" } ?? "")).monospacedDigit()
             }
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(c)
