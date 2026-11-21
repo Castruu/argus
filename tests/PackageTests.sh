@@ -12,6 +12,7 @@ app="$work/Applications/CC Sessions Viewer.app"
 ditto "$mount/CC Sessions Viewer.app" "$app"
 codesign --verify --deep --strict "$app"
 resources="$app/Contents/Resources"
+test -s "$resources/AppIcon.icns"
 for script in focus focus-terminal; do test -s "$resources/$script.applescript"; done
 for hook in summarize statusline; do test -x "$resources/hooks/$hook.sh"; done
 test "$(env HOME="$work/user" CODEX_HOME="$work/user/.codex" "$app/Contents/MacOS/ccs" --limits --json)" = '[]'

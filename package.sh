@@ -26,6 +26,13 @@ mkdir -p "$contents/MacOS" "$contents/Resources/hooks"
 cp build/notch build/ccs "$contents/MacOS/"
 cp notch/*.applescript LICENSE notch/ProviderIcons-LICENSE "$contents/Resources/"
 cp hooks/*.sh "$contents/Resources/hooks/"
+iconset="$work/AppIcon.iconset"
+mkdir "$iconset"
+for size in 16 32 128 256 512; do
+    sips -s format png -z "$size" "$size" packaging/AppIcon.svg --out "$iconset/icon_${size}x$size.png" >/dev/null
+    sips -s format png -z "$((size * 2))" "$((size * 2))" packaging/AppIcon.svg --out "$iconset/icon_${size}x$size@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$contents/Resources/AppIcon.icns"
 ln -s /Applications "$work/image/Applications"
 cat > "$contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +42,7 @@ cat > "$contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>com.github.castruu.cc-sessions-viewer</string>
     <key>CFBundleName</key><string>$name</string>
     <key>CFBundleExecutable</key><string>notch</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleShortVersionString</key><string>$version</string>

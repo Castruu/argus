@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The open notch panel with three stacked sessions: working, needs you, idle. -->
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3D7BFF"/>
+      <stop offset="0.55" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#E06AA8"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0.25" cy="0.1" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowBlue"><stop offset="0.3" stop-color="#47B2FF" stop-opacity="0.55"/><stop offset="1" stop-color="#47B2FF" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glowViolet"><stop offset="0.3" stop-color="#C373FF" stop-opacity="0.6"/><stop offset="1" stop-color="#C373FF" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glowGreen"><stop offset="0.3" stop-color="#53DB8A" stop-opacity="0.5"/><stop offset="1" stop-color="#53DB8A" stop-opacity="0"/></radialGradient>
+    <clipPath id="tile"><rect x="100" y="100" width="824" height="824" rx="186"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#wall)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#shine)"/>
+    <!-- soft shadow under the panel -->
+    <path d="M238 100Q262 100 262 124V610Q262 682 334 682H690Q762 682 762 610V124Q762 100 786 100Z" fill="#14103A" opacity="0.28"/>
+    <!-- panel dropping out of the notch -->
+    <path d="M238 100Q262 100 262 124V592Q262 664 334 664H690Q762 664 762 592V124Q762 100 786 100Z" fill="#000"/>
+    <!-- camera -->
+    <circle cx="512" cy="162" r="14" fill="#15151C"/>
+    <circle cx="507" cy="157" r="4" fill="#3A4A7A"/>
+
+    <!-- working -->
+    <rect x="296" y="224" width="432" height="124" rx="30" fill="#14141B"/>
+    <circle cx="358" cy="286" r="50" fill="url(#glowBlue)"/>
+    <circle cx="358" cy="286" r="22" fill="#47B2FF"/>
+    <rect x="410" y="259" width="270" height="22" rx="11" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="410" y="297" width="170" height="16" rx="8" fill="#47B2FF" opacity="0.75"/>
+
+    <!-- needs you -->
+    <rect x="296" y="364" width="432" height="124" rx="30" fill="#2A1F42"/>
+    <circle cx="358" cy="426" r="50" fill="url(#glowViolet)"/>
+    <circle cx="358" cy="426" r="22" fill="#C373FF"/>
+    <rect x="410" y="399" width="220" height="22" rx="11" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="410" y="437" width="200" height="16" rx="8" fill="#C373FF" opacity="0.8"/>
+
+    <!-- idle -->
+    <rect x="296" y="504" width="432" height="124" rx="30" fill="#14141B"/>
+    <circle cx="358" cy="566" r="50" fill="url(#glowGreen)"/>
+    <circle cx="358" cy="566" r="22" fill="#53DB8A"/>
+    <rect x="410" y="539" width="250" height="22" rx="11" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="410" y="577" width="130" height="16" rx="8" fill="#53DB8A" opacity="0.75"/>
+  </g>
+</svg>
