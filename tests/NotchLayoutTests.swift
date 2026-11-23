@@ -124,6 +124,27 @@ import SwiftUI
         scrolls[0].contentView.scroll(to: NSPoint(x: 0, y: 100))
         assert(scrolls[0].contentView.bounds.origin.y > 0, "The first folder should scroll")
         assert(scrolls[1].contentView.bounds.origin == neighborOrigin, "Scrolling a folder must leave its neighbor still")
+
+        // Drag the second folder's thumb to the bottom and back.
+        window.setFrameOrigin(NSPoint(x: -3000, y: -3000)) // gestures only receive events in an ordered-in window; keep it off screen
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let frame = scrolls[1].convert(scrolls[1].bounds, to: nil)
+        func mouse(_ type: NSEvent.EventType, dy: CGFloat) {
+            window.sendEvent(NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: frame.maxX - 2, y: frame.maxY - 8 - dy), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: 1)!)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        mouse(.leftMouseDown, dy: 0)
+        mouse(.leftMouseDragged, dy: 100)
+        mouse(.leftMouseDragged, dy: 400)
+        let bottom = scrolls[1].documentView!.frame.height - scrolls[1].contentView.bounds.height
+        assert(abs(scrolls[1].contentView.bounds.origin.y - bottom) < 1, "Dragging the thumb down should reach the last session")
+        mouse(.leftMouseDragged, dy: 0)
+        mouse(.leftMouseUp, dy: 0)
+        assert(scrolls[1].contentView.bounds.origin.y < 1, "Dragging the thumb back should return to the first session")
     }
 
     static func usageShape(_ image: NSImage) -> (bar: Bool, height: Int, top: Int) {

@@ -674,28 +674,45 @@ struct NotchView: View {
     }
 }
 
-/// A vertical scroll view with a thin thumb styled like the row accent bars.
+/// A vertical scroll view with a thin, draggable thumb styled like the row accent bars.
 /// The system scroller takes a 17pt track out of the content, so scrolling rows wrapped narrower than their neighbors.
 struct ThinScroll<Content: View>: View {
     @ViewBuilder let content: Content
     @State private var doc = CGRect.zero // the content's frame within the viewport
     @State private var viewport: CGFloat = 0
+    @State private var grabbed: CGFloat? // scroll progress when the drag began
+    @State private var hover = false
 
     var body: some View {
-        ScrollView(.vertical) {
-            content.onGeometryChange(for: CGRect.self) { $0.frame(in: .named("thinScroll")) } action: { doc = $0 }
-        }
-        .scrollIndicators(.never) // .hidden still shows them while a mouse is connected
-        .coordinateSpace(name: "thinScroll")
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport = $0 }
-        .overlay(alignment: .topTrailing) {
-            if viewport > 0, doc.height > viewport {
-                let thumb = max(16, viewport * viewport / doc.height)
-                let progress = min(1, max(0, -doc.minY / (doc.height - viewport)))
-                RoundedRectangle(cornerRadius: 1.5).fill(.white.opacity(0.3))
-                    .frame(width: 3, height: thumb)
-                    .offset(y: progress * (viewport - thumb))
-                    .allowsHitTesting(false)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                content.onGeometryChange(for: CGRect.self) { $0.frame(in: .named("thinScroll")) } action: { doc = $0 }
+                    .id("doc")
+            }
+            .scrollIndicators(.never) // .hidden still shows them while a mouse is connected
+            .coordinateSpace(name: "thinScroll")
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport = $0 }
+            .overlay(alignment: .topTrailing) {
+                if viewport > 16, doc.height > viewport {
+                    let thumb = max(16, viewport * viewport / doc.height)
+                    let progress = min(1, max(0, -doc.minY / (doc.height - viewport)))
+                    RoundedRectangle(cornerRadius: 1.5).fill(.white.opacity(hover || grabbed != nil ? 0.6 : 0.3))
+                        .frame(width: 3, height: thumb)
+                        .frame(width: 11, alignment: .trailing) // 3pt is too thin to grab
+                        .contentShape(Rectangle())
+                        .offset(y: progress * (viewport - thumb))
+                        .onHover { hover = $0 }
+                        // global: the thumb moves under the pointer, so a local translation would feed back
+                        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                            .onChanged { drag in
+                                let start = grabbed ?? progress
+                                grabbed = start
+                                let to = min(1, max(0, start + drag.translation.height / (viewport - thumb)))
+                                // anchor y = progress lines up the same fraction of content and viewport
+                                proxy.scrollTo("doc", anchor: UnitPoint(x: 0, y: to))
+                            }
+                            .onEnded { _ in grabbed = nil })
+                }
             }
         }
     }
