@@ -117,6 +117,8 @@ import SwiftUI
         for scroll in scrolls {
             assert(scroll.documentView!.frame.height > scroll.contentView.bounds.height,
                    "Sessions beyond the third must remain reachable by scrolling")
+            assert(scroll.contentView.frame.width == scroll.frame.width,
+                   "The system scroller track must not narrow the rows")
         }
         let neighborOrigin = scrolls[1].contentView.bounds.origin
         scrolls[0].contentView.scroll(to: NSPoint(x: 0, y: 100))

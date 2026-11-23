@@ -594,7 +594,7 @@ struct NotchView: View {
                         }
                         .hidden()
                         .overlay {
-                            ScrollView(.vertical) { rows }
+                            ThinScroll { rows }
                         }
                     } else {
                         rows
@@ -671,6 +671,33 @@ struct NotchView: View {
         .modifier(Clickable())
         .modifier(SummaryHoverCard(text: s.stale == true ? nil : s.summary ?? (s.last_prompt.isEmpty ? nil : "You: \(s.last_prompt)"), preview: summaryPreview))
         .onTapGesture { summaryPreview.close(); focus(s) }
+    }
+}
+
+/// A vertical scroll view with a thin thumb styled like the row accent bars.
+/// The system scroller takes a 17pt track out of the content, so scrolling rows wrapped narrower than their neighbors.
+struct ThinScroll<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var doc = CGRect.zero // the content's frame within the viewport
+    @State private var viewport: CGFloat = 0
+
+    var body: some View {
+        ScrollView(.vertical) {
+            content.onGeometryChange(for: CGRect.self) { $0.frame(in: .named("thinScroll")) } action: { doc = $0 }
+        }
+        .scrollIndicators(.never) // .hidden still shows them while a mouse is connected
+        .coordinateSpace(name: "thinScroll")
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport = $0 }
+        .overlay(alignment: .topTrailing) {
+            if viewport > 0, doc.height > viewport {
+                let thumb = max(16, viewport * viewport / doc.height)
+                let progress = min(1, max(0, -doc.minY / (doc.height - viewport)))
+                RoundedRectangle(cornerRadius: 1.5).fill(.white.opacity(0.3))
+                    .frame(width: 3, height: thumb)
+                    .offset(y: progress * (viewport - thumb))
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }
 

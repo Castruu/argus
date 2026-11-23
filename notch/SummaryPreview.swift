@@ -115,7 +115,7 @@ struct SummaryCard: View {
     var body: some View {
         ViewThatFits(in: .vertical) {
             summary
-            ScrollView(.vertical) { summary }
+            ThinScroll { summary.padding(.trailing, 8) } // keep the text clear of the thumb
         }
         .frame(width: 340)
         .frame(maxHeight: 280)
